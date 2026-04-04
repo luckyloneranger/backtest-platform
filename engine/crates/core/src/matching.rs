@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::{Action, Bar, OrderType, Signal};
+use crate::types::{Action, Bar, OrderType, ProductType, Signal};
 
 // ── Side ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +20,7 @@ pub struct Order {
     pub order_type: OrderType,
     pub limit_price: f64,
     pub stop_price: f64,
+    pub product_type: ProductType,
 }
 
 impl Order {
@@ -31,6 +32,7 @@ impl Order {
             order_type: OrderType::Market,
             limit_price: 0.0,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -42,6 +44,7 @@ impl Order {
             order_type: OrderType::Market,
             limit_price: 0.0,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -53,6 +56,7 @@ impl Order {
             order_type: OrderType::Limit,
             limit_price: price,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -64,6 +68,7 @@ impl Order {
             order_type: OrderType::Limit,
             limit_price: price,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -75,6 +80,7 @@ impl Order {
             order_type: OrderType::Sl,
             limit_price: 0.0,
             stop_price: stop,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -86,6 +92,7 @@ impl Order {
             order_type: OrderType::Sl,
             limit_price: 0.0,
             stop_price: stop,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -104,6 +111,7 @@ impl Order {
             order_type: signal.order_type,
             limit_price: signal.limit_price,
             stop_price: signal.stop_price,
+            product_type: signal.product_type,
         }
     }
 }
@@ -117,6 +125,7 @@ pub struct Fill {
     pub quantity: i32,
     pub fill_price: f64,
     pub timestamp_ms: i64,
+    pub product_type: ProductType,
 }
 
 // ── CircuitLimits ──────────────────────────────────────────────────────────
@@ -197,6 +206,7 @@ impl OrderMatcher {
                             quantity: order.quantity,
                             fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
+                            product_type: order.product_type,
                         });
                     } else {
                         rejections.push(OrderRejection {
@@ -216,6 +226,7 @@ impl OrderMatcher {
                             quantity: order.quantity,
                             fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
+                            product_type: order.product_type,
                         });
                     } else {
                         rejections.push(OrderRejection {
@@ -238,6 +249,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -261,6 +273,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -286,6 +299,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -309,6 +323,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -334,6 +349,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -357,6 +373,7 @@ impl OrderMatcher {
                                 quantity: order.quantity,
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
+                                product_type: order.product_type,
                             });
                         } else {
                             rejections.push(OrderRejection {

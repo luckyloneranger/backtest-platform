@@ -156,12 +156,18 @@ message Signal {
     SL = 2;
     SL_M = 3;
   }
+  enum ProductType {
+    CNC = 0;     // Cash & Carry (delivery) — equity delivery
+    MIS = 1;     // Margin Intraday Settlement — equity intraday
+    NRML = 2;    // Normal — F&O overnight
+  }
   Action action = 1;
   string symbol = 2;
   int32 quantity = 3;
   OrderType order_type = 4;
   double limit_price = 5;
   double stop_price = 6;
+  ProductType product_type = 7;
 }
 
 // --- Complete ---

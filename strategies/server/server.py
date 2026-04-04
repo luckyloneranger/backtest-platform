@@ -175,6 +175,7 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
         for s in signals:
             action_map = {"HOLD": 0, "BUY": 1, "SELL": 2}
             order_map = {"MARKET": 0, "LIMIT": 1, "SL": 2, "SL_M": 3}
+            product_map = {"CNC": 0, "MIS": 1, "NRML": 2}
             proto_signals.append(strategy_pb2.Signal(
                 action=action_map[s.action],
                 symbol=s.symbol,
@@ -182,6 +183,7 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
                 order_type=order_map[s.order_type],
                 limit_price=s.limit_price,
                 stop_price=s.stop_price,
+                product_type=product_map.get(s.product_type, 0),
             ))
 
         return strategy_pb2.BarResponse(signals=proto_signals)

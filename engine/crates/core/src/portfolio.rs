@@ -246,6 +246,7 @@ impl PortfolioManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ProductType;
 
     fn buy_fill(symbol: &str, qty: i32, price: f64, ts: i64) -> Fill {
         Fill {
@@ -254,6 +255,7 @@ mod tests {
             quantity: qty,
             fill_price: price,
             timestamp_ms: ts,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -264,6 +266,7 @@ mod tests {
             quantity: qty,
             fill_price: price,
             timestamp_ms: ts,
+            product_type: ProductType::Cnc,
         }
     }
 

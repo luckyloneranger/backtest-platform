@@ -31,6 +31,19 @@ pub enum OrderType {
     SlM,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProductType {
+    Cnc,   // Cash & Carry (delivery)
+    Mis,   // Margin Intraday Settlement
+    Nrml,  // Normal (F&O overnight)
+}
+
+impl Default for ProductType {
+    fn default() -> Self {
+        ProductType::Cnc
+    }
+}
+
 // ── Signal ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +54,7 @@ pub struct Signal {
     pub order_type: OrderType,
     pub limit_price: f64,
     pub stop_price: f64,
+    pub product_type: ProductType,
 }
 
 impl Signal {
@@ -53,6 +67,7 @@ impl Signal {
             order_type: OrderType::Market,
             limit_price: 0.0,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 
@@ -65,6 +80,7 @@ impl Signal {
             order_type: OrderType::Market,
             limit_price: 0.0,
             stop_price: 0.0,
+            product_type: ProductType::Cnc,
         }
     }
 }

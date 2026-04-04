@@ -141,6 +141,7 @@ class DonchianBreakout(Strategy):
                     if qty > 0:
                         signals.append(Signal(
                             action="BUY", symbol=symbol, quantity=qty,
+                            product_type="CNC",
                         ))
                         self.in_position[symbol] = True
                         self.highest_since_entry[symbol] = bar.close
@@ -174,6 +175,7 @@ class DonchianBreakout(Strategy):
                     if held_qty > 0:
                         signals.append(Signal(
                             action="SELL", symbol=symbol, quantity=held_qty,
+                            product_type="CNC",
                         ))
                     self.in_position[symbol] = False
                     self.trailing_stop[symbol] = 0.0
