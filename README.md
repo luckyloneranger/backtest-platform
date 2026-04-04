@@ -6,15 +6,21 @@ An Indian market backtesting platform for evaluating trading strategies against 
 
 ## Features
 
-- **Event-driven backtesting** — bar-by-bar simulation with realistic order matching (market, limit, stop-loss, SL-M)
+- **Event-driven backtesting** — bar-by-bar simulation with realistic order matching (market, limit, stop-loss, SL-M) and gap handling
+- **Short selling** — strategies can go long and short; positions can be negative
 - **Multi-timeframe support** — strategies declare which intervals they need; lookback buffers pre-populated from warmup data
-- **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback (with costs), order rejections, trade history, and session context via `MarketSnapshot`
+- **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback (with costs), order rejections, pending orders, trade history, and session context via `MarketSnapshot`
 - **Zerodha Kite Connect integration** — fetch instruments, historical candles (minute to daily), OI data, continuous futures
 - **Indian market cost model** — zero equity brokerage (Zerodha current pricing), STT, GST, SEBI fees, stamp duty; ₹20/order (per side) for F&O only
 - **Product type support** — strategies choose CNC (delivery), MIS (intraday), or NRML (F&O) per signal, with correct cost calculation derived from instrument metadata
+- **MIS auto-squareoff** — intraday positions automatically closed at 3:20 PM IST
+- **Order management** — cancel pending limit/SL orders; volume constraints limit fill qty to % of bar volume
+- **Risk controls** — max drawdown kill switch, daily loss limit, per-symbol position limit, portfolio exposure limit
 - **Circuit limit checking** — optional order rejection at upper/lower circuit bounds
-- **Margin validation** — optional buy-side position sizing limits (sells never margin-blocked)
-- **Performance metrics** — Sharpe, Sortino (sample std dev), Calmar, max drawdown, CAGR (from actual equity curve), win rate, profit factor
+- **Performance metrics** — Sharpe, Sortino (sample std dev), Calmar, max drawdown, CAGR, win rate, profit factor, per-symbol breakdown, monthly returns, benchmark comparison, trade duration
+- **Trading calendar** — NSE holidays 2020-2027, test data generator skips holidays
+- **Corporate actions** — split/bonus/dividend adjustments for historical prices
+- **Reference symbols** — non-tradable index data (e.g., NIFTY 50) for regime detection
 - **All Kite intervals** — minute, 3min, 5min, 10min, 15min, 30min, 60min, daily
 - **Auto candle chunking** — transparently handles Kite's 2000-candle API limit
 - **Multi-symbol backtests** — all symbols grouped per timestamp in one `on_bar` call
@@ -207,9 +213,9 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 | Strategy | Type | Timeframes | Description |
 |----------|------|-----------|-------------|
-| `sma_crossover` | Deterministic | day | Simple Moving Average crossover (golden/death cross) |
-| `rsi_daily_trend` | Deterministic | 15min + day | RSI for entry timing, daily EMA for trend filter, dynamic position sizing |
-| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with volume confirmation and ATR trailing stop |
+| `sma_crossover` | Deterministic | day | SMA crossover with ATR sizing, trailing stops, pyramiding, long+short |
+| `rsi_daily_trend` | Deterministic | 15min + day | RSI mean reversion with pyramid entries (RSI 40/30/20), partial exits, ATR stops, long+short |
+| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with risk-based sizing, partial profits, tighter trailing stops, long+short |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — sends market data, receives BUY/SELL |
 
 ## Strategy Interface
@@ -230,6 +236,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `history` | `dict[tuple[str, str], list[BarData]]` | `(symbol, interval) → last N bars` |
 | `portfolio` | `Portfolio` | Cash, equity, positions |
 | `instruments` | `dict[str, InstrumentInfo]` | lot_size, tick_size, expiry, strike, circuit limits |
+| `pending_orders` | `list[PendingOrder]` | Unfilled limit/SL orders from previous bars |
 | `fills` | `list[FillInfo]` | Fills from previous bar (includes per-fill costs) |
 | `rejections` | `list[OrderRejection]` | Rejected orders with reasons |
 | `closed_trades` | `list[TradeInfo]` | All completed trades |
@@ -237,15 +244,15 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 ### Signal fields
 
-`action` (BUY/SELL/HOLD), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`, `product_type` (CNC/MIS/NRML)
+`action` (BUY/SELL/HOLD/CANCEL), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`, `product_type` (CNC/MIS/NRML)
 
 ## Running Tests
 
 ```bash
-# Rust (108 tests)
+# Rust (156 tests)
 cd engine && cargo test
 
-# Python (54 tests)
+# Python (76 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
