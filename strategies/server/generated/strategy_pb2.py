@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0estrategy.proto\x12\x08\x62\x61\x63ktest\"J\n\x0bInitRequest\x12\x15\n\rstrategy_name\x18\x01 \x01(\t\x12\x13\n\x0b\x63onfig_json\x18\x02 \x01(\t\x12\x0f\n\x07symbols\x18\x03 \x03(\t\".\n\x0cInitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"\xb1\x01\n\x08\x42\x61rEvent\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\x12\x0e\n\x06symbol\x18\x02 \x01(\t\x12\x0c\n\x04open\x18\x03 \x01(\x01\x12\x0c\n\x04high\x18\x04 \x01(\x01\x12\x0b\n\x03low\x18\x05 \x01(\x01\x12\r\n\x05\x63lose\x18\x06 \x01(\x01\x12\x0e\n\x06volume\x18\x07 \x01(\x03\x12\n\n\x02oi\x18\x08 \x01(\x03\x12+\n\tportfolio\x18\t \x01(\x0b\x32\x18.backtest.PortfolioState\"Y\n\x0ePortfolioState\x12\x0c\n\x04\x63\x61sh\x18\x01 \x01(\x01\x12\x0e\n\x06\x65quity\x18\x02 \x01(\x01\x12)\n\tpositions\x18\x03 \x03(\x0b\x32\x16.backtest.PositionInfo\"[\n\x0cPositionInfo\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x10\n\x08quantity\x18\x02 \x01(\x05\x12\x11\n\tavg_price\x18\x03 \x01(\x01\x12\x16\n\x0eunrealized_pnl\x18\x04 \x01(\x01\"0\n\x0b\x42\x61rResponse\x12!\n\x07signals\x18\x01 \x03(\x0b\x32\x10.backtest.Signal\"\x89\x02\n\x06Signal\x12\'\n\x06\x61\x63tion\x18\x01 \x01(\x0e\x32\x17.backtest.Signal.Action\x12\x0e\n\x06symbol\x18\x02 \x01(\t\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12.\n\norder_type\x18\x04 \x01(\x0e\x32\x1a.backtest.Signal.OrderType\x12\x13\n\x0blimit_price\x18\x05 \x01(\x01\x12\x12\n\nstop_price\x18\x06 \x01(\x01\"%\n\x06\x41\x63tion\x12\x08\n\x04HOLD\x10\x00\x12\x07\n\x03\x42UY\x10\x01\x12\x08\n\x04SELL\x10\x02\"4\n\tOrderType\x12\n\n\x06MARKET\x10\x00\x12\t\n\x05LIMIT\x10\x01\x12\x06\n\x02SL\x10\x02\x12\x08\n\x04SL_M\x10\x03\"\x11\n\x0f\x43ompleteRequest\"/\n\x10\x43ompleteResponse\x12\x1b\n\x13\x63ustom_metrics_json\x18\x01 \x01(\t2\xc7\x01\n\x0fStrategyService\x12;\n\nInitialize\x12\x15.backtest.InitRequest\x1a\x16.backtest.InitResponse\x12\x32\n\x05OnBar\x12\x12.backtest.BarEvent\x1a\x15.backtest.BarResponse\x12\x43\n\nOnComplete\x12\x19.backtest.CompleteRequest\x1a\x1a.backtest.CompleteResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0estrategy.proto\x12\x08\x62\x61\x63ktest\"y\n\x0bInitRequest\x12\x15\n\rstrategy_name\x18\x01 \x01(\t\x12\x13\n\x0b\x63onfig_json\x18\x02 \x01(\t\x12\x0f\n\x07symbols\x18\x03 \x03(\t\x12-\n\x0binstruments\x18\x04 \x03(\x0b\x32\x18.backtest.InstrumentInfo\".\n\x0cInitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"\xef\x02\n\x08\x42\x61rEvent\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\x12\x1f\n\x04\x62\x61rs\x18\x02 \x03(\x0b\x32\x11.backtest.BarData\x12(\n\x07history\x18\x03 \x03(\x0b\x32\x17.backtest.SymbolHistory\x12+\n\tportfolio\x18\x04 \x01(\x0b\x32\x18.backtest.PortfolioState\x12-\n\x0binstruments\x18\x05 \x03(\x0b\x32\x18.backtest.InstrumentInfo\x12!\n\x05\x66ills\x18\x06 \x03(\x0b\x32\x12.backtest.FillInfo\x12,\n\nrejections\x18\x07 \x03(\x0b\x32\x18.backtest.OrderRejection\x12*\n\rclosed_trades\x18\x08 \x03(\x0b\x32\x13.backtest.TradeInfo\x12)\n\x07\x63ontext\x18\t \x01(\x0b\x32\x18.backtest.SessionContext\"m\n\x07\x42\x61rData\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x0c\n\x04open\x18\x02 \x01(\x01\x12\x0c\n\x04high\x18\x03 \x01(\x01\x12\x0b\n\x03low\x18\x04 \x01(\x01\x12\r\n\x05\x63lose\x18\x05 \x01(\x01\x12\x0e\n\x06volume\x18\x06 \x01(\x03\x12\n\n\x02oi\x18\x07 \x01(\x03\"@\n\rSymbolHistory\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x1f\n\x04\x62\x61rs\x18\x02 \x03(\x0b\x32\x11.backtest.BarData\"\xdf\x01\n\x0eInstrumentInfo\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x10\n\x08\x65xchange\x18\x02 \x01(\t\x12\x17\n\x0finstrument_type\x18\x03 \x01(\t\x12\x10\n\x08lot_size\x18\x04 \x01(\x05\x12\x11\n\ttick_size\x18\x05 \x01(\x01\x12\x0e\n\x06\x65xpiry\x18\x06 \x01(\t\x12\x0e\n\x06strike\x18\x07 \x01(\x01\x12\x13\n\x0boption_type\x18\x08 \x01(\t\x12\x1b\n\x13\x63ircuit_limit_upper\x18\t \x01(\x01\x12\x1b\n\x13\x63ircuit_limit_lower\x18\n \x01(\x01\"s\n\x08\x46illInfo\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x0c\n\x04side\x18\x02 \x01(\t\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12\x12\n\nfill_price\x18\x04 \x01(\x01\x12\r\n\x05\x63osts\x18\x05 \x01(\x01\x12\x14\n\x0ctimestamp_ms\x18\x06 \x01(\x03\"P\n\x0eOrderRejection\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x0c\n\x04side\x18\x02 \x01(\t\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12\x0e\n\x06reason\x18\x04 \x01(\t\"\xa9\x01\n\tTradeInfo\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x10\n\x08quantity\x18\x02 \x01(\x05\x12\x13\n\x0b\x65ntry_price\x18\x03 \x01(\x01\x12\x12\n\nexit_price\x18\x04 \x01(\x01\x12\x1a\n\x12\x65ntry_timestamp_ms\x18\x05 \x01(\x03\x12\x19\n\x11\x65xit_timestamp_ms\x18\x06 \x01(\x03\x12\x0b\n\x03pnl\x18\x07 \x01(\x01\x12\r\n\x05\x63osts\x18\x08 \x01(\x01\"\xa2\x01\n\x0eSessionContext\x12\x17\n\x0finitial_capital\x18\x01 \x01(\x01\x12\x12\n\nbar_number\x18\x02 \x01(\x05\x12\x12\n\ntotal_bars\x18\x03 \x01(\x05\x12\x12\n\nstart_date\x18\x04 \x01(\t\x12\x10\n\x08\x65nd_date\x18\x05 \x01(\t\x12\x10\n\x08interval\x18\x06 \x01(\t\x12\x17\n\x0flookback_window\x18\x07 \x01(\x05\"Y\n\x0ePortfolioState\x12\x0c\n\x04\x63\x61sh\x18\x01 \x01(\x01\x12\x0e\n\x06\x65quity\x18\x02 \x01(\x01\x12)\n\tpositions\x18\x03 \x03(\x0b\x32\x16.backtest.PositionInfo\"[\n\x0cPositionInfo\x12\x0e\n\x06symbol\x18\x01 \x01(\t\x12\x10\n\x08quantity\x18\x02 \x01(\x05\x12\x11\n\tavg_price\x18\x03 \x01(\x01\x12\x16\n\x0eunrealized_pnl\x18\x04 \x01(\x01\"0\n\x0b\x42\x61rResponse\x12!\n\x07signals\x18\x01 \x03(\x0b\x32\x10.backtest.Signal\"\x89\x02\n\x06Signal\x12\'\n\x06\x61\x63tion\x18\x01 \x01(\x0e\x32\x17.backtest.Signal.Action\x12\x0e\n\x06symbol\x18\x02 \x01(\t\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12.\n\norder_type\x18\x04 \x01(\x0e\x32\x1a.backtest.Signal.OrderType\x12\x13\n\x0blimit_price\x18\x05 \x01(\x01\x12\x12\n\nstop_price\x18\x06 \x01(\x01\"%\n\x06\x41\x63tion\x12\x08\n\x04HOLD\x10\x00\x12\x07\n\x03\x42UY\x10\x01\x12\x08\n\x04SELL\x10\x02\"4\n\tOrderType\x12\n\n\x06MARKET\x10\x00\x12\t\n\x05LIMIT\x10\x01\x12\x06\n\x02SL\x10\x02\x12\x08\n\x04SL_M\x10\x03\"\x11\n\x0f\x43ompleteRequest\"/\n\x10\x43ompleteResponse\x12\x1b\n\x13\x63ustom_metrics_json\x18\x01 \x01(\t2\xc7\x01\n\x0fStrategyService\x12;\n\nInitialize\x12\x15.backtest.InitRequest\x1a\x16.backtest.InitResponse\x12\x32\n\x05OnBar\x12\x12.backtest.BarEvent\x1a\x15.backtest.BarResponse\x12\x43\n\nOnComplete\x12\x19.backtest.CompleteRequest\x1a\x1a.backtest.CompleteResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,27 +32,41 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'strategy_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_INITREQUEST']._serialized_start=28
-  _globals['_INITREQUEST']._serialized_end=102
-  _globals['_INITRESPONSE']._serialized_start=104
-  _globals['_INITRESPONSE']._serialized_end=150
-  _globals['_BAREVENT']._serialized_start=153
-  _globals['_BAREVENT']._serialized_end=330
-  _globals['_PORTFOLIOSTATE']._serialized_start=332
-  _globals['_PORTFOLIOSTATE']._serialized_end=421
-  _globals['_POSITIONINFO']._serialized_start=423
-  _globals['_POSITIONINFO']._serialized_end=514
-  _globals['_BARRESPONSE']._serialized_start=516
-  _globals['_BARRESPONSE']._serialized_end=564
-  _globals['_SIGNAL']._serialized_start=567
-  _globals['_SIGNAL']._serialized_end=832
-  _globals['_SIGNAL_ACTION']._serialized_start=741
-  _globals['_SIGNAL_ACTION']._serialized_end=778
-  _globals['_SIGNAL_ORDERTYPE']._serialized_start=780
-  _globals['_SIGNAL_ORDERTYPE']._serialized_end=832
-  _globals['_COMPLETEREQUEST']._serialized_start=834
-  _globals['_COMPLETEREQUEST']._serialized_end=851
-  _globals['_COMPLETERESPONSE']._serialized_start=853
-  _globals['_COMPLETERESPONSE']._serialized_end=900
-  _globals['_STRATEGYSERVICE']._serialized_start=903
-  _globals['_STRATEGYSERVICE']._serialized_end=1102
+  _globals['_INITREQUEST']._serialized_end=149
+  _globals['_INITRESPONSE']._serialized_start=151
+  _globals['_INITRESPONSE']._serialized_end=197
+  _globals['_BAREVENT']._serialized_start=200
+  _globals['_BAREVENT']._serialized_end=567
+  _globals['_BARDATA']._serialized_start=569
+  _globals['_BARDATA']._serialized_end=678
+  _globals['_SYMBOLHISTORY']._serialized_start=680
+  _globals['_SYMBOLHISTORY']._serialized_end=744
+  _globals['_INSTRUMENTINFO']._serialized_start=747
+  _globals['_INSTRUMENTINFO']._serialized_end=970
+  _globals['_FILLINFO']._serialized_start=972
+  _globals['_FILLINFO']._serialized_end=1087
+  _globals['_ORDERREJECTION']._serialized_start=1089
+  _globals['_ORDERREJECTION']._serialized_end=1169
+  _globals['_TRADEINFO']._serialized_start=1172
+  _globals['_TRADEINFO']._serialized_end=1341
+  _globals['_SESSIONCONTEXT']._serialized_start=1344
+  _globals['_SESSIONCONTEXT']._serialized_end=1506
+  _globals['_PORTFOLIOSTATE']._serialized_start=1508
+  _globals['_PORTFOLIOSTATE']._serialized_end=1597
+  _globals['_POSITIONINFO']._serialized_start=1599
+  _globals['_POSITIONINFO']._serialized_end=1690
+  _globals['_BARRESPONSE']._serialized_start=1692
+  _globals['_BARRESPONSE']._serialized_end=1740
+  _globals['_SIGNAL']._serialized_start=1743
+  _globals['_SIGNAL']._serialized_end=2008
+  _globals['_SIGNAL_ACTION']._serialized_start=1917
+  _globals['_SIGNAL_ACTION']._serialized_end=1954
+  _globals['_SIGNAL_ORDERTYPE']._serialized_start=1956
+  _globals['_SIGNAL_ORDERTYPE']._serialized_end=2008
+  _globals['_COMPLETEREQUEST']._serialized_start=2010
+  _globals['_COMPLETEREQUEST']._serialized_end=2027
+  _globals['_COMPLETERESPONSE']._serialized_start=2029
+  _globals['_COMPLETERESPONSE']._serialized_end=2076
+  _globals['_STRATEGYSERVICE']._serialized_start=2079
+  _globals['_STRATEGYSERVICE']._serialized_end=2278
 # @@protoc_insertion_point(module_scope)
