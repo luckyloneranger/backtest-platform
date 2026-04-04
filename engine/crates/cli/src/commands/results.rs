@@ -66,6 +66,13 @@ fn handle_show(id: &str) -> Result<()> {
     );
     println!("  CAGR:             {:.2}%", metrics.cagr * 100.0);
     println!();
+    println!("--- Benchmark ---");
+    println!(
+        "  Benchmark Return: {:.2}%",
+        metrics.benchmark_return_pct * 100.0
+    );
+    println!("  Alpha:            {:.2}%", metrics.alpha_pct * 100.0);
+    println!();
     println!("--- Risk Metrics ---");
     println!("  Sharpe Ratio:     {:.4}", metrics.sharpe_ratio);
     println!("  Sortino Ratio:    {:.4}", metrics.sortino_ratio);
@@ -103,6 +110,57 @@ fn handle_show(id: &str) -> Result<()> {
         "  Total Costs:      {:.2}",
         metrics.trade_stats.total_costs
     );
+    println!(
+        "  Avg Duration:     {:.0} ms",
+        metrics.trade_stats.avg_duration_ms
+    );
+    println!(
+        "  Min Duration:     {} ms",
+        metrics.trade_stats.min_duration_ms
+    );
+    println!(
+        "  Max Duration:     {} ms",
+        metrics.trade_stats.max_duration_ms
+    );
+
+    // Per-symbol breakdown
+    if !metrics.per_symbol.is_empty() {
+        println!();
+        println!("--- Per-Symbol Breakdown ---");
+        println!(
+            "  {:<12} {:>6} {:>6} {:>6} {:>8} {:>12} {:>10}",
+            "Symbol", "Trades", "Wins", "Losses", "WinRate", "TotalPnL", "AvgPnL"
+        );
+        println!("  {}", "-".repeat(68));
+        for sm in &metrics.per_symbol {
+            println!(
+                "  {:<12} {:>6} {:>6} {:>6} {:>7.1}% {:>12.2} {:>10.2}",
+                sm.symbol,
+                sm.total_trades,
+                sm.winning_trades,
+                sm.losing_trades,
+                sm.win_rate * 100.0,
+                sm.total_pnl,
+                sm.avg_pnl,
+            );
+        }
+    }
+
+    // Monthly returns
+    if !metrics.monthly_returns.is_empty() {
+        println!();
+        println!("--- Monthly Returns ---");
+        println!("  {:<10} {:>10}", "Month", "Return");
+        println!("  {}", "-".repeat(22));
+        for mr in &metrics.monthly_returns {
+            println!(
+                "  {}-{:02}     {:>9.2}%",
+                mr.year,
+                mr.month,
+                mr.return_pct * 100.0,
+            );
+        }
+    }
 
     Ok(())
 }

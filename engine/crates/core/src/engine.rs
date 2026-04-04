@@ -98,6 +98,9 @@ pub struct BacktestResult {
     pub initial_capital: f64,
     pub config: BacktestConfig,
     pub custom_metrics: serde_json::Value,
+    /// Pre-computed buy-and-hold benchmark return (fraction, e.g. 0.10 = 10%).
+    /// Computed by the CLI from bar data before metrics calculation.
+    pub benchmark_return_pct: Option<f64>,
 }
 
 // ── Helper: interval -> bars per day ────────────────────────────────────────
@@ -401,6 +404,7 @@ impl BacktestEngine {
             initial_capital: config.initial_capital,
             config,
             custom_metrics,
+            benchmark_return_pct: None, // set by caller (CLI) if available
         })
     }
 }

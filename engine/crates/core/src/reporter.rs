@@ -323,6 +323,7 @@ mod tests {
                 lookback_window: 200,
             },
             custom_metrics: serde_json::json!({"custom_key": 42}),
+            benchmark_return_pct: None,
         }
     }
 
@@ -442,6 +443,7 @@ mod tests {
                 lookback_window: 200,
             },
             custom_metrics: serde_json::json!({}),
+            benchmark_return_pct: None,
         };
 
         let id = reporter.save(&result).unwrap();

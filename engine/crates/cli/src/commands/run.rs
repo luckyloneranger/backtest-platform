@@ -236,8 +236,49 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         args.to,
     );
 
-    let result =
-        BacktestEngine::run(config, bars_by_interval, initial_lookback, &strategy, instruments, &requirements).await?;
+    let mut result =
+        BacktestEngine::run(config, bars_by_interval.clone(), initial_lookback, &strategy, instruments, &requirements).await?;
+
+    // Compute buy-and-hold benchmark return from bar data.
+    // For each symbol, find the first and last close across all intervals, then
+    // compute an equal-weighted average return.
+    {
+        let mut symbol_returns: Vec<f64> = Vec::new();
+        for symbol in &args.symbols {
+            let mut first_close: Option<(i64, f64)> = None;
+            let mut last_close: Option<(i64, f64)> = None;
+            for bars in bars_by_interval.values() {
+                for bar in bars {
+                    if bar.symbol == *symbol {
+                        match first_close {
+                            None => first_close = Some((bar.timestamp_ms, bar.close)),
+                            Some((ts, _)) if bar.timestamp_ms < ts => {
+                                first_close = Some((bar.timestamp_ms, bar.close));
+                            }
+                            _ => {}
+                        }
+                        match last_close {
+                            None => last_close = Some((bar.timestamp_ms, bar.close)),
+                            Some((ts, _)) if bar.timestamp_ms > ts => {
+                                last_close = Some((bar.timestamp_ms, bar.close));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if let (Some((_, fc)), Some((_, lc))) = (first_close, last_close) {
+                if fc > 0.0 {
+                    symbol_returns.push((lc - fc) / fc);
+                }
+            }
+        }
+        if !symbol_returns.is_empty() {
+            let avg_return =
+                symbol_returns.iter().sum::<f64>() / symbol_returns.len() as f64;
+            result.benchmark_return_pct = Some(avg_return);
+        }
+    }
 
     // Save results
     let reporter = Reporter::new(Path::new("./results"));

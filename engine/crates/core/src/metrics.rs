@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::BacktestResult;
@@ -182,6 +183,12 @@ pub struct TradeStatistics {
     pub avg_pnl: f64,
     pub total_pnl: f64,
     pub total_costs: f64,
+    #[serde(default)]
+    pub avg_duration_ms: f64,
+    #[serde(default)]
+    pub min_duration_ms: i64,
+    #[serde(default)]
+    pub max_duration_ms: i64,
 }
 
 pub fn trade_statistics(trades: &[ClosedTrade]) -> TradeStatistics {
@@ -197,6 +204,9 @@ pub fn trade_statistics(trades: &[ClosedTrade]) -> TradeStatistics {
             avg_pnl: 0.0,
             total_pnl: 0.0,
             total_costs: 0.0,
+            avg_duration_ms: 0.0,
+            min_duration_ms: 0,
+            max_duration_ms: 0,
         };
     }
 
@@ -235,6 +245,15 @@ pub fn trade_statistics(trades: &[ClosedTrade]) -> TradeStatistics {
 
     let avg_pnl = total_pnl / total_trades as f64;
 
+    // Trade duration statistics
+    let durations: Vec<i64> = trades
+        .iter()
+        .map(|t| t.exit_timestamp_ms - t.entry_timestamp_ms)
+        .collect();
+    let avg_duration_ms = durations.iter().sum::<i64>() as f64 / total_trades as f64;
+    let min_duration_ms = *durations.iter().min().unwrap();
+    let max_duration_ms = *durations.iter().max().unwrap();
+
     TradeStatistics {
         total_trades,
         winning_trades,
@@ -246,7 +265,32 @@ pub fn trade_statistics(trades: &[ClosedTrade]) -> TradeStatistics {
         avg_pnl,
         total_pnl,
         total_costs,
+        avg_duration_ms,
+        min_duration_ms,
+        max_duration_ms,
     }
+}
+
+// ── Per-Symbol Breakdown ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolMetrics {
+    pub symbol: String,
+    pub total_trades: usize,
+    pub winning_trades: usize,
+    pub losing_trades: usize,
+    pub win_rate: f64,
+    pub total_pnl: f64,
+    pub avg_pnl: f64,
+}
+
+// ── Monthly Returns ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthlyReturn {
+    pub year: i32,
+    pub month: u32,
+    pub return_pct: f64,
 }
 
 // ── Metrics Report ──────────────────────────────────────────────────────────
@@ -264,6 +308,14 @@ pub struct MetricsReport {
     pub trade_stats: TradeStatistics,
     pub final_equity: f64,
     pub initial_capital: f64,
+    #[serde(default)]
+    pub per_symbol: Vec<SymbolMetrics>,
+    #[serde(default)]
+    pub monthly_returns: Vec<MonthlyReturn>,
+    #[serde(default)]
+    pub benchmark_return_pct: f64,
+    #[serde(default)]
+    pub alpha_pct: f64,
 }
 
 impl MetricsReport {
@@ -272,8 +324,11 @@ impl MetricsReport {
     /// 1. Groups equity curve points by day (takes last equity per day).
     /// 2. Computes daily returns between consecutive days.
     /// 3. Calculates ratio-based metrics (Sharpe, Sortino, Calmar, etc.).
-    /// 4. Computes trade statistics.
-    /// 5. Assembles the full report.
+    /// 4. Computes trade statistics (including duration stats).
+    /// 5. Computes per-symbol breakdown.
+    /// 6. Computes monthly returns from equity curve.
+    /// 7. Computes benchmark comparison (alpha).
+    /// 8. Assembles the full report.
     pub fn compute(result: &BacktestResult) -> Self {
         let initial_capital = result.initial_capital;
         let final_equity = result.final_equity;
@@ -310,8 +365,18 @@ impl MetricsReport {
         let max_dd_dur = max_drawdown_duration(&daily_eq);
         let calmar_ratio = calculate_calmar(cagr, max_dd_pct);
 
-        // 5. Compute trade statistics
+        // 5. Compute trade statistics (includes duration stats)
         let trade_stats = trade_statistics(&result.trades);
+
+        // 6. Compute per-symbol breakdown
+        let per_symbol = compute_per_symbol(&result.trades);
+
+        // 7. Compute monthly returns from equity curve
+        let monthly_returns = compute_monthly_returns(&result.equity_curve);
+
+        // 8. Compute benchmark comparison
+        let benchmark_return_pct = result.benchmark_return_pct.unwrap_or(0.0);
+        let alpha_pct = total_return_pct - benchmark_return_pct;
 
         Self {
             total_return_pct,
@@ -325,11 +390,96 @@ impl MetricsReport {
             trade_stats,
             final_equity,
             initial_capital,
+            per_symbol,
+            monthly_returns,
+            benchmark_return_pct,
+            alpha_pct,
         }
     }
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────
+
+/// Compute per-symbol metrics by grouping closed trades by symbol.
+fn compute_per_symbol(trades: &[ClosedTrade]) -> Vec<SymbolMetrics> {
+    let mut grouped: BTreeMap<String, Vec<&ClosedTrade>> = BTreeMap::new();
+    for trade in trades {
+        grouped
+            .entry(trade.symbol.clone())
+            .or_default()
+            .push(trade);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(symbol, symbol_trades)| {
+            let total_trades = symbol_trades.len();
+            let winning_trades = symbol_trades.iter().filter(|t| t.pnl > 0.0).count();
+            let losing_trades = symbol_trades.iter().filter(|t| t.pnl < 0.0).count();
+            let win_rate = if total_trades > 0 {
+                winning_trades as f64 / total_trades as f64
+            } else {
+                0.0
+            };
+            let total_pnl: f64 = symbol_trades.iter().map(|t| t.pnl).sum();
+            let avg_pnl = if total_trades > 0 {
+                total_pnl / total_trades as f64
+            } else {
+                0.0
+            };
+            SymbolMetrics {
+                symbol,
+                total_trades,
+                winning_trades,
+                losing_trades,
+                win_rate,
+                total_pnl,
+                avg_pnl,
+            }
+        })
+        .collect()
+}
+
+/// Compute monthly returns from the equity curve.
+///
+/// Groups equity curve points by YYYY-MM and computes the return for each
+/// month as `(last_equity - first_equity) / first_equity`.
+fn compute_monthly_returns(curve: &[EquityPoint]) -> Vec<MonthlyReturn> {
+    if curve.is_empty() {
+        return Vec::new();
+    }
+
+    // Group by (year, month). Use a BTreeMap for sorted output.
+    let mut month_map: BTreeMap<(i32, u32), (f64, f64)> = BTreeMap::new();
+
+    for pt in curve {
+        // Convert timestamp_ms to a NaiveDateTime to extract year/month
+        let secs = pt.timestamp_ms / 1000;
+        let nsecs = ((pt.timestamp_ms % 1000) * 1_000_000) as u32;
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
+            let key = (dt.year(), dt.month());
+            let entry = month_map.entry(key).or_insert((pt.equity, pt.equity));
+            // Always update the last equity (curve is time-ordered)
+            entry.1 = pt.equity;
+        }
+    }
+
+    month_map
+        .into_iter()
+        .map(|((year, month), (first_eq, last_eq))| {
+            let return_pct = if first_eq > 0.0 {
+                (last_eq - first_eq) / first_eq
+            } else {
+                0.0
+            };
+            MonthlyReturn {
+                year,
+                month,
+                return_pct,
+            }
+        })
+        .collect()
+}
 
 /// Compute the mean of a slice of f64 values. Returns 0.0 for empty input.
 fn mean(values: &[f64]) -> f64 {
@@ -639,6 +789,9 @@ mod tests {
         assert_eq!(stats.avg_pnl, 0.0);
         assert_eq!(stats.total_pnl, 0.0);
         assert_eq!(stats.total_costs, 0.0);
+        assert_eq!(stats.avg_duration_ms, 0.0);
+        assert_eq!(stats.min_duration_ms, 0);
+        assert_eq!(stats.max_duration_ms, 0);
     }
 
     // ── test helpers ────────────────────────────────────────────────────
@@ -748,6 +901,7 @@ mod tests {
                 lookback_window: 200,
             },
             custom_metrics: serde_json::json!({}),
+            benchmark_return_pct: None,
         };
 
         let report = MetricsReport::compute(&result);
@@ -765,5 +919,168 @@ mod tests {
         assert!(report.volatility >= 0.0);
         assert_eq!(report.trade_stats.total_trades, 2);
         assert_eq!(report.trade_stats.winning_trades, 2);
+    }
+
+    // ── test per-symbol metrics ────────────────────────────────────────
+
+    #[test]
+    fn test_per_symbol_metrics() {
+        // 4 trades across 2 symbols:
+        // RELIANCE: 2 trades (+1000, -200) => 2 total, 1 win, 1 loss, win_rate=0.5, total_pnl=800, avg_pnl=400
+        // INFY: 2 trades (+500, +300) => 2 total, 2 wins, 0 losses, win_rate=1.0, total_pnl=800, avg_pnl=400
+        let trades = vec![
+            ClosedTrade {
+                symbol: "RELIANCE".into(),
+                pnl: 1000.0,
+                ..ClosedTrade::default()
+            },
+            ClosedTrade {
+                symbol: "RELIANCE".into(),
+                pnl: -200.0,
+                ..ClosedTrade::default()
+            },
+            ClosedTrade {
+                symbol: "INFY".into(),
+                pnl: 500.0,
+                ..ClosedTrade::default()
+            },
+            ClosedTrade {
+                symbol: "INFY".into(),
+                pnl: 300.0,
+                ..ClosedTrade::default()
+            },
+        ];
+
+        let per_symbol = compute_per_symbol(&trades);
+        assert_eq!(per_symbol.len(), 2);
+
+        // BTreeMap ordering: INFY comes before RELIANCE
+        let infy = &per_symbol[0];
+        assert_eq!(infy.symbol, "INFY");
+        assert_eq!(infy.total_trades, 2);
+        assert_eq!(infy.winning_trades, 2);
+        assert_eq!(infy.losing_trades, 0);
+        assert!((infy.win_rate - 1.0).abs() < 1e-6);
+        assert!((infy.total_pnl - 800.0).abs() < 1e-6);
+        assert!((infy.avg_pnl - 400.0).abs() < 1e-6);
+
+        let rel = &per_symbol[1];
+        assert_eq!(rel.symbol, "RELIANCE");
+        assert_eq!(rel.total_trades, 2);
+        assert_eq!(rel.winning_trades, 1);
+        assert_eq!(rel.losing_trades, 1);
+        assert!((rel.win_rate - 0.5).abs() < 1e-6);
+        assert!((rel.total_pnl - 800.0).abs() < 1e-6);
+        assert!((rel.avg_pnl - 400.0).abs() < 1e-6);
+    }
+
+    // ── test monthly returns ───────────────────────────────────────────
+
+    #[test]
+    fn test_monthly_returns() {
+        // Equity curve spanning 3 months:
+        // Jan 2024: equity goes from 100_000 to 105_000 => return = 5%
+        // Feb 2024: equity goes from 105_000 to 110_000 => return ~4.76%
+        // Mar 2024: equity goes from 110_000 to 108_000 => return ~-1.82%
+
+        // Jan 1 2024 00:00 UTC = 1704067200000 ms
+        let jan_1 = 1_704_067_200_000_i64;
+        let feb_1 = 1_706_745_600_000_i64; // Feb 1 2024 00:00 UTC
+        let mar_1 = 1_709_251_200_000_i64; // Mar 1 2024 00:00 UTC
+
+        let curve = vec![
+            EquityPoint { timestamp_ms: jan_1, equity: 100_000.0 },
+            EquityPoint { timestamp_ms: jan_1 + 86_400_000, equity: 102_000.0 },
+            EquityPoint { timestamp_ms: jan_1 + 86_400_000 * 15, equity: 105_000.0 },
+            EquityPoint { timestamp_ms: feb_1, equity: 105_000.0 },
+            EquityPoint { timestamp_ms: feb_1 + 86_400_000 * 14, equity: 110_000.0 },
+            EquityPoint { timestamp_ms: mar_1, equity: 110_000.0 },
+            EquityPoint { timestamp_ms: mar_1 + 86_400_000 * 10, equity: 108_000.0 },
+        ];
+
+        let monthly = compute_monthly_returns(&curve);
+        assert_eq!(monthly.len(), 3);
+
+        // January 2024
+        assert_eq!(monthly[0].year, 2024);
+        assert_eq!(monthly[0].month, 1);
+        // return = (105_000 - 100_000) / 100_000 = 0.05
+        assert!(
+            (monthly[0].return_pct - 0.05).abs() < 1e-6,
+            "Jan return should be 5%, got {}",
+            monthly[0].return_pct
+        );
+
+        // February 2024
+        assert_eq!(monthly[1].year, 2024);
+        assert_eq!(monthly[1].month, 2);
+        // return = (110_000 - 105_000) / 105_000 = 0.047619...
+        let expected_feb = (110_000.0 - 105_000.0) / 105_000.0;
+        assert!(
+            (monthly[1].return_pct - expected_feb).abs() < 1e-6,
+            "Feb return should be ~4.76%, got {}",
+            monthly[1].return_pct
+        );
+
+        // March 2024
+        assert_eq!(monthly[2].year, 2024);
+        assert_eq!(monthly[2].month, 3);
+        // return = (108_000 - 110_000) / 110_000 = -0.01818...
+        let expected_mar = (108_000.0 - 110_000.0) / 110_000.0;
+        assert!(
+            (monthly[2].return_pct - expected_mar).abs() < 1e-6,
+            "Mar return should be ~-1.82%, got {}",
+            monthly[2].return_pct
+        );
+    }
+
+    // ── test trade duration statistics ─────────────────────────────────
+
+    #[test]
+    fn test_trade_duration_stats() {
+        // 3 trades with known timestamps:
+        // Trade 1: entry=1000, exit=5000  => duration=4000ms
+        // Trade 2: entry=2000, exit=12000 => duration=10000ms
+        // Trade 3: entry=3000, exit=6000  => duration=3000ms
+        let trades = vec![
+            ClosedTrade {
+                entry_timestamp_ms: 1000,
+                exit_timestamp_ms: 5000,
+                pnl: 100.0,
+                ..ClosedTrade::default()
+            },
+            ClosedTrade {
+                entry_timestamp_ms: 2000,
+                exit_timestamp_ms: 12000,
+                pnl: -50.0,
+                ..ClosedTrade::default()
+            },
+            ClosedTrade {
+                entry_timestamp_ms: 3000,
+                exit_timestamp_ms: 6000,
+                pnl: 200.0,
+                ..ClosedTrade::default()
+            },
+        ];
+
+        let stats = trade_statistics(&trades);
+
+        // avg_duration = (4000 + 10000 + 3000) / 3 = 17000/3 = 5666.666...
+        let expected_avg = 17_000.0 / 3.0;
+        assert!(
+            (stats.avg_duration_ms - expected_avg).abs() < 1e-6,
+            "avg_duration_ms should be ~5666.67, got {}",
+            stats.avg_duration_ms
+        );
+        assert_eq!(stats.min_duration_ms, 3000);
+        assert_eq!(stats.max_duration_ms, 10000);
+    }
+
+    #[test]
+    fn test_empty_trades_duration() {
+        let stats = trade_statistics(&[]);
+        assert_eq!(stats.avg_duration_ms, 0.0);
+        assert_eq!(stats.min_duration_ms, 0);
+        assert_eq!(stats.max_duration_ms, 0);
     }
 }
