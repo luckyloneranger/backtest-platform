@@ -69,10 +69,16 @@ impl KiteClient {
 
     /// Fetch historical candles for a specific instrument token.
     ///
-    /// `GET {base_url}/instruments/historical/{instrument_token}/{interval}?from={from}&to={to}`
+    /// `GET {base_url}/instruments/historical/{instrument_token}/{interval}?from=…&to=…&oi=1[&continuous=1]`
     ///
     /// Kite limits responses to ~2000 candles per request.
     /// `from` and `to` use the format `YYYY-MM-DD+HH:MM:SS` or `YYYY-MM-DD`.
+    ///
+    /// `oi=1` is always sent so that open-interest data is included for F&O
+    /// instruments (equity candles simply return `0`).
+    ///
+    /// When `continuous` is `true`, `continuous=1` is appended so Kite returns
+    /// a continuous futures series stitched across expiries.
     pub async fn fetch_candles(
         &self,
         instrument_token: &str,
@@ -80,6 +86,7 @@ impl KiteClient {
         interval: Interval,
         from: &str,
         to: &str,
+        continuous: bool,
     ) -> Result<Vec<Bar>> {
         let url = format!(
             "{}/instruments/historical/{}/{}",
@@ -88,11 +95,16 @@ impl KiteClient {
             interval.as_kite_str()
         );
 
+        let mut params: Vec<(&str, &str)> = vec![("from", from), ("to", to), ("oi", "1")];
+        if continuous {
+            params.push(("continuous", "1"));
+        }
+
         let resp = self
             .client
             .get(&url)
             .header("Authorization", self.auth_header())
-            .query(&[("from", from), ("to", to)])
+            .query(&params)
             .send()
             .await
             .context("failed to send candles request")?;

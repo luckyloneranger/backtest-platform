@@ -27,6 +27,9 @@ pub enum DataCommands {
         token: Option<String>,
         #[arg(long, default_value = "NSE")]
         exchange: String,
+        /// Fetch continuous futures data across expiries
+        #[arg(long, default_value_t = false)]
+        continuous: bool,
     },
     /// List cached data
     List,
@@ -61,7 +64,8 @@ pub async fn handle(cmd: DataCommands) -> Result<()> {
             interval,
             token,
             exchange,
-        } => handle_fetch(&symbol, &from, &to, &interval, &token, &exchange).await,
+            continuous,
+        } => handle_fetch(&symbol, &from, &to, &interval, &token, &exchange, continuous).await,
         DataCommands::List => handle_list(),
         DataCommands::GenerateTestData {
             symbol,
@@ -90,6 +94,7 @@ async fn handle_fetch(
     interval: &str,
     token: &Option<String>,
     exchange: &str,
+    continuous: bool,
 ) -> Result<()> {
     let api_key =
         std::env::var("KITE_API_KEY").context("KITE_API_KEY environment variable not set")?;
@@ -124,7 +129,7 @@ async fn handle_fetch(
     let interval_enum = parse_interval(interval)?;
     let client = KiteClient::new(api_key, access_token);
     let bars = client
-        .fetch_candles(&resolved_token, symbol, interval_enum, from, to)
+        .fetch_candles(&resolved_token, symbol, interval_enum, from, to, continuous)
         .await?;
 
     let store = CandleStore::new(Path::new("./data"));
