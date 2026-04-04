@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use clap::Parser;
 
 use backtest_core::config::BacktestConfig;
@@ -59,11 +60,25 @@ fn parse_interval(s: &str) -> Result<Interval> {
     super::parse_interval(s)
 }
 
+/// Parse a YYYY-MM-DD date string to epoch milliseconds (start of day UTC).
+fn date_to_ms(date_str: &str) -> Result<i64> {
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .with_context(|| format!("invalid date: {date_str}"))?;
+    Ok(date
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis())
+}
+
 pub async fn handle(args: RunArgs) -> Result<()> {
     let interval = parse_interval(&args.interval)?;
 
     let strategy_params: serde_json::Value = serde_json::from_str(&args.params)
         .context("failed to parse --params as JSON")?;
+
+    let from_ms = date_to_ms(&args.from)?;
+    let to_ms = date_to_ms(&args.to)? + 86_400_000 - 1; // end of day inclusive
 
     let config = BacktestConfig {
         strategy_name: args.strategy.clone(),
@@ -111,7 +126,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         let mut interval_bars = Vec::new();
 
         for symbol in &args.symbols {
-            let bars = store.read("NSE", symbol, req_interval, None, None)?;
+            let bars = store.read("NSE", symbol, req_interval, Some(from_ms), Some(to_ms))?;
             if bars.is_empty() {
                 eprintln!(
                     "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
