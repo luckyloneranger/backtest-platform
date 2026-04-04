@@ -9,8 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd engine
 cargo build                          # build all crates
 cargo build --release -p backtest-cli # release build of CLI binary
-cargo test                           # run all tests (98 tests across workspace)
-cargo test -p backtest-core           # test single crate
+cargo test                           # run all tests (108 tests across workspace)
+cargo test -p backtest-core           # test single crate (85 tests)
 cargo test -p backtest-core -- matching  # test single module
 ```
 
@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (21 tests)
+pytest tests/ -v                     # run strategy tests (54 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -36,7 +36,7 @@ $CLI data fetch-instruments                    # fetch all instruments from Kite
 $CLI data fetch --symbol RELIANCE --from 2024-01-01 --to 2025-03-31 --interval day
 $CLI data fetch --symbol RELIANCE --from 2025-03-01 --to 2025-03-31 --interval 5minute  # auto-chunks
 $CLI data list
-$CLI run --strategy sma_crossover --symbols RELIANCE --from 2024-01-01 --to 2025-03-31 --capital 1000000 --interval day --params '{"fast_period": 10, "slow_period": 30}'
+$CLI run --strategy sma_crossover --symbols RELIANCE --from 2024-01-01 --to 2025-03-31 --capital 1000000 --interval day --exchange NSE --params '{"fast_period": 10, "slow_period": 30}'
 $CLI results list
 $CLI results show <backtest_id>
 ```
@@ -67,17 +67,17 @@ Dependency flow: `cli → data → core → proto`
 
 ### Strategy Data Flow
 
-**Strategy declares requirements → Engine provides data → Strategy decides → Engine executes.**
+**Strategy declares requirements → CLI loads data with warmup → Engine ticks active bars → Strategy decides → Engine executes.**
 
 1. Engine calls `GetRequirements` RPC → strategy returns intervals + lookback per interval
-2. Engine loads candle data for each (symbol, interval) from CandleStore
-3. Engine ticks at the finest declared interval
-4. Each tick: `MarketSnapshot.timeframes` is `{interval → {symbol → BarData}}`. Coarser bars only appear when their candle closes.
+2. CLI loads warmup bars (before `--from`) into pre-populated lookback buffers, and active bars (`--from` to `--to`) for the engine to tick through
+3. Engine ticks at the finest declared interval over active bars only
+4. Each tick: `MarketSnapshot.timeframes` is `{interval → {symbol → BarData}}`. Coarser bars only appear when their candle closes. `history` contains lookback bars (pre-filled from warmup + accumulating during active period).
 5. Strategy returns signals → engine processes orders
 
 ### Event Loop (`BacktestEngine::run`)
 
-Per timestamp: process pending orders (with circuit limit + margin checks) → update portfolio prices → build `MarketSnapshot` with all timeframes, lookback, fills, rejections, trades, instruments → call strategy via gRPC → submit new orders from signals. Market orders fill at next bar's open. Costs applied per fill via `ZerodhaCostModel`.
+Per timestamp: process pending orders (with circuit limit + margin checks for buys only) → update portfolio prices → build `MarketSnapshot` with all timeframes, lookback, fills (with costs), rejections, trades, instruments → call strategy via gRPC → submit new orders from signals. Market orders fill at next bar's open. SL-M orders fill at market price with slippage when triggered. Costs applied per fill via `ZerodhaCostModel`. Sells without a position are rejected. Oversells are clamped to actual position size.
 
 ### Data Storage
 
@@ -98,10 +98,22 @@ Per timestamp: process pending orders (with circuit limit + margin checks) → u
 - `fetch_candles_chunked` auto-splits requests to stay under Kite's 2000-candle limit
 - The `StrategyClient` trait in `engine.rs` is the abstraction boundary — `GrpcStrategyClient` is the production impl, tests use mock impls
 - `CircuitLimits` in `OrderMatcher` are optional — set via `set_circuit_limits()`, unset means no checking
-- `BacktestConfig.margin_available` is optional — when `Some`, orders exceeding the margin are skipped
+- `BacktestConfig.margin_available` is optional — when `Some`, buy orders exceeding the margin are rejected (sells are never margin-blocked)
 - Order rejections (circuit limit, margin) are tracked and sent to strategies via `MarketSnapshot.rejections`
-- Strategies declare data needs via `required_data()` — engine loads and serves accordingly
+- Strategies declare data needs via `required_data()` — CLI loads warmup bars to pre-populate lookback buffers, then only active bars are ticked through (no warmup `on_bar` calls)
 - Multi-timeframe: engine ticks at finest interval, coarser bars appear only when their candle closes
+- Lookback buffers are pre-populated from bars before `--from` date — strategies get full history from the first `on_bar` call
+- Sells without a position are rejected with a warning. Oversells (quantity > position) are clamped to actual position size.
+- `ClosedTrade.pnl` is net of costs (entry + exit costs subtracted from price-difference PnL)
+- `Fill.costs` tracks per-fill transaction costs and is passed to strategies via gRPC
+- `BarData` includes `timestamp_ms` for time-aware analysis in strategy history
+- SL-M (stop-loss market) orders fill at market price (bar.open ± slippage) when triggered, not at stop price
+- Metrics use sample standard deviation (N-1) for Sharpe/Sortino. CAGR derived from actual equity curve timestamps.
+- `CandleStore.write()` merges new bars with existing data (deduplicates by timestamp). Does not overwrite.
+- Test data generator uses IST (UTC+5:30) timestamps to match real Kite data
 - Signals include `product_type`: `CNC` (equity delivery), `MIS` (equity intraday), `NRML` (F&O overnight). Engine derives `is_intraday` from this for cost calculation.
-- Zerodha charges zero brokerage on all equity trades (CNC and MIS). ₹20/order only applies to F&O.
+- Zerodha charges zero brokerage on all equity trades (CNC and MIS). ₹20/order (per side) applies to F&O only.
 - Cost model (`ZerodhaCostModel`): zero equity brokerage, STT (0.1% delivery both sides, 0.025% intraday sell-only), transaction charges, GST, SEBI fees, stamp duty
+- CLI `run` command supports `--exchange` flag (default NSE) for BSE/MCX backtesting
+- Instrument metadata is loaded from `instruments.db` and passed to the engine for correct cost model (instrument type) and strategy use
+- `run` command filters bars by `--from/--to` date range; lookback warmup bars are loaded separately and pre-populate the history buffer

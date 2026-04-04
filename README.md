@@ -6,18 +6,21 @@ An Indian market backtesting platform for evaluating trading strategies against 
 
 ## Features
 
-- **Event-driven backtesting** — bar-by-bar simulation with realistic order matching (market, limit, stop-loss)
-- **Multi-timeframe support** — strategies declare which intervals they need; engine loads and serves all of them
-- **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback, order rejections, trade history, and session context via `MarketSnapshot`
+- **Event-driven backtesting** — bar-by-bar simulation with realistic order matching (market, limit, stop-loss, SL-M)
+- **Multi-timeframe support** — strategies declare which intervals they need; lookback buffers pre-populated from warmup data
+- **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback (with costs), order rejections, trade history, and session context via `MarketSnapshot`
 - **Zerodha Kite Connect integration** — fetch instruments, historical candles (minute to daily), OI data, continuous futures
-- **Indian market cost model** — zero equity brokerage (Zerodha current pricing), STT, GST, SEBI fees, stamp duty; ₹20/order for F&O only
-- **Product type support** — strategies choose CNC (delivery), MIS (intraday), or NRML (F&O) per signal, with correct cost calculation for each
+- **Indian market cost model** — zero equity brokerage (Zerodha current pricing), STT, GST, SEBI fees, stamp duty; ₹20/order (per side) for F&O only
+- **Product type support** — strategies choose CNC (delivery), MIS (intraday), or NRML (F&O) per signal, with correct cost calculation derived from instrument metadata
 - **Circuit limit checking** — optional order rejection at upper/lower circuit bounds
-- **Margin validation** — optional position sizing limits
-- **Performance metrics** — Sharpe, Sortino, Calmar, max drawdown, CAGR, win rate, profit factor
+- **Margin validation** — optional buy-side position sizing limits (sells never margin-blocked)
+- **Performance metrics** — Sharpe, Sortino (sample std dev), Calmar, max drawdown, CAGR (from actual equity curve), win rate, profit factor
 - **All Kite intervals** — minute, 3min, 5min, 10min, 15min, 30min, 60min, daily
 - **Auto candle chunking** — transparently handles Kite's 2000-candle API limit
 - **Multi-symbol backtests** — all symbols grouped per timestamp in one `on_bar` call
+- **Multi-exchange support** — `--exchange` flag supports NSE, BSE, MCX
+- **LLM-based strategies** — Azure OpenAI integration for AI-powered signal generation
+- **Candle data merging** — fetching additional date ranges merges with existing data, never overwrites
 
 ## Architecture
 
@@ -86,7 +89,7 @@ python -m server.server
   --strategy sma_crossover \
   --symbols TESTSTOCK \
   --from 2023-01-01 --to 2023-12-31 \
-  --capital 1000000 --interval day \
+  --capital 1000000 --interval day --exchange NSE \
   --params '{"fast_period": 10, "slow_period": 30}'
 ```
 
@@ -227,7 +230,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `history` | `dict[tuple[str, str], list[BarData]]` | `(symbol, interval) → last N bars` |
 | `portfolio` | `Portfolio` | Cash, equity, positions |
 | `instruments` | `dict[str, InstrumentInfo]` | lot_size, tick_size, expiry, strike, circuit limits |
-| `fills` | `list[FillInfo]` | Fills from previous bar |
+| `fills` | `list[FillInfo]` | Fills from previous bar (includes per-fill costs) |
 | `rejections` | `list[OrderRejection]` | Rejected orders with reasons |
 | `closed_trades` | `list[TradeInfo]` | All completed trades |
 | `context` | `SessionContext` | initial_capital, bar_number, total_bars, dates, intervals |
@@ -239,10 +242,10 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 ## Running Tests
 
 ```bash
-# Rust (98 tests)
+# Rust (108 tests)
 cd engine && cargo test
 
-# Python (21 tests)
+# Python (54 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
