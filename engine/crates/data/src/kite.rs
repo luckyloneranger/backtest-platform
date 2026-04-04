@@ -235,8 +235,8 @@ pub fn parse_candles_json(json_text: &str, symbol: &str) -> Result<Vec<Bar>> {
     let mut bars = Vec::with_capacity(response.data.candles.len());
 
     for candle in &response.data.candles {
-        if candle.len() < 7 {
-            continue; // skip malformed rows
+        if candle.len() < 6 {
+            continue; // skip malformed rows (need at least ts, o, h, l, c, v)
         }
 
         let ts_str = candle[0]
@@ -260,9 +260,8 @@ pub fn parse_candles_json(json_text: &str, symbol: &str) -> Result<Vec<Bar>> {
         let volume = candle[5]
             .as_i64()
             .context("candle volume should be an integer")?;
-        let oi = candle[6]
-            .as_i64()
-            .context("candle OI should be an integer")?;
+        // OI is optional — equity candles have 6 elements, F&O have 7
+        let oi = candle.get(6).and_then(|v| v.as_i64()).unwrap_or(0);
 
         bars.push(Bar {
             timestamp_ms,
