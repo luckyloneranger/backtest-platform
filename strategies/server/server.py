@@ -60,6 +60,9 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
 
     def GetRequirements(self, request, context):
         try:
+            # TODO: config_json is available in request.config_json but is not
+            # passed to the strategy's required_data(). Strategies may need it
+            # to dynamically adjust their interval/lookback requirements.
             # Temporarily instantiate the strategy to get its requirements
             strategy = get_strategy(request.strategy_name)
 
@@ -92,6 +95,7 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
                 symbol_bars[b.symbol] = BarData(
                     symbol=b.symbol, open=b.open, high=b.high,
                     low=b.low, close=b.close, volume=b.volume, oi=b.oi,
+                    timestamp_ms=b.timestamp_ms,
                 )
             timeframes[tf.interval] = symbol_bars
 
@@ -101,7 +105,8 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             key = (th.symbol, th.interval)
             history[key] = [
                 BarData(symbol=th.symbol, open=b.open, high=b.high,
-                        low=b.low, close=b.close, volume=b.volume, oi=b.oi)
+                        low=b.low, close=b.close, volume=b.volume, oi=b.oi,
+                        timestamp_ms=b.timestamp_ms)
                 for b in th.bars
             ]
 

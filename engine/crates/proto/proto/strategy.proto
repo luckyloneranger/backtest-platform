@@ -60,6 +60,7 @@ message BarData {
   double close = 5;
   int64 volume = 6;
   int64 oi = 7;
+  int64 timestamp_ms = 8;
 }
 
 message TimeframeData {

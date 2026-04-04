@@ -52,6 +52,7 @@ fn bar_to_proto(b: &crate::types::Bar) -> BarData {
         close: b.close,
         volume: b.volume,
         oi: b.oi,
+        timestamp_ms: b.timestamp_ms,
     }
 }
 
@@ -193,7 +194,7 @@ impl StrategyClient for GrpcStrategyClient {
                 },
                 quantity: f.quantity,
                 fill_price: f.fill_price,
-                costs: 0.0, // costs are tracked in portfolio, not in fills
+                costs: f.costs,
                 timestamp_ms: f.timestamp_ms,
             })
             .collect();

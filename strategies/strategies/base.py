@@ -11,6 +11,7 @@ class BarData:
     close: float
     volume: int
     oi: int
+    timestamp_ms: int = 0
 
 
 @dataclass

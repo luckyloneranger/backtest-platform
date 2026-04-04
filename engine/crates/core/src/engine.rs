@@ -225,7 +225,7 @@ impl BacktestEngine {
             let mut current_rejections = Vec::new();
             for bar in finest_bar_group {
                 let (fills, rejects) = matcher.process_bar(bar);
-                for fill in &fills {
+                for mut fill in fills {
                     let trade_value = fill.quantity as f64 * fill.fill_price;
                     let is_intraday = fill.product_type == ProductType::Mis;
                     let inst_type = instrument_type_map
@@ -248,9 +248,11 @@ impl BacktestEngine {
                         quantity: fill.quantity,
                     };
                     let costs = cost_model.calculate(&params);
-                    portfolio.apply_fill(fill, costs.total());
+                    let total_costs = costs.total();
+                    portfolio.apply_fill(&fill, total_costs);
+                    fill.costs = total_costs;
+                    current_fills.push(fill);
                 }
-                current_fills.extend(fills);
                 current_rejections.extend(rejects);
             }
 

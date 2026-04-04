@@ -149,6 +149,7 @@ pub struct Fill {
     pub fill_price: f64,
     pub timestamp_ms: i64,
     pub product_type: ProductType,
+    pub costs: f64,
 }
 
 // ── CircuitLimits ──────────────────────────────────────────────────────────
@@ -230,6 +231,7 @@ impl OrderMatcher {
                             fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
                             product_type: order.product_type,
+                            costs: 0.0,
                         });
                     } else {
                         rejections.push(OrderRejection {
@@ -250,6 +252,7 @@ impl OrderMatcher {
                             fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
                             product_type: order.product_type,
+                            costs: 0.0,
                         });
                     } else {
                         rejections.push(OrderRejection {
@@ -273,6 +276,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -297,6 +301,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -323,6 +328,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -347,6 +353,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -373,6 +380,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {
@@ -397,6 +405,7 @@ impl OrderMatcher {
                                 fill_price: price,
                                 timestamp_ms: bar.timestamp_ms,
                                 product_type: order.product_type,
+                                costs: 0.0,
                             });
                         } else {
                             rejections.push(OrderRejection {

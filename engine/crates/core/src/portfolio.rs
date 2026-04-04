@@ -275,6 +275,7 @@ mod tests {
             fill_price: price,
             timestamp_ms: ts,
             product_type: ProductType::Cnc,
+            costs: 0.0,
         }
     }
 
@@ -286,6 +287,7 @@ mod tests {
             fill_price: price,
             timestamp_ms: ts,
             product_type: ProductType::Cnc,
+            costs: 0.0,
         }
     }
 
