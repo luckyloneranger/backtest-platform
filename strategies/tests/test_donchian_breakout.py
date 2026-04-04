@@ -1,4 +1,4 @@
-"""Tests for Donchian Breakout strategy (rewritten with risk sizing, partial profits, pyramiding)."""
+"""Tests for Donchian Breakout strategy (risk sizing, partial profits, pyramiding, short selling)."""
 
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo,
@@ -310,3 +310,307 @@ def test_no_signal_during_warmup():
         s.on_bar(make_snapshot(i, close_day=100.0 + i))
     signals = s.on_bar(make_snapshot(10, close_15m=100.0))
     assert signals == []
+
+
+# ==============================================================================
+# SHORT SELLING TESTS
+# ==============================================================================
+
+
+def _build_channel_for_short(strategy, num_bars=8, base_price=105.0, volume=100_000):
+    """Feed daily bars with descending highs to create a channel where a low break is possible.
+
+    Prices: base_price - i, so they trend downward, creating:
+      highs like 107, 106, 105, 104, 103, 102, 101, 100
+      lows  like 103, 102, 101, 100, 99, 98, 97, 96
+    Channel low (min of lows excluding last) will be around 97-98.
+    """
+    for i in range(num_bars):
+        price = base_price - i
+        strategy.on_bar(make_snapshot(
+            i, close_day=price, high_day=price + 2, low_day=price - 2, volume_day=volume,
+        ))
+
+
+def _enter_short_position(strategy, entry_price=90.0, volume_day=200_000):
+    """Feed a daily bar (to update volume) + 15-min bar below channel low to trigger short entry."""
+    # Feed another daily bar to have enough volume history
+    strategy.on_bar(make_snapshot(
+        8, close_day=entry_price, high_day=entry_price + 2,
+        low_day=entry_price - 2, volume_day=volume_day,
+    ))
+    return strategy.on_bar(make_snapshot(100, close_15m=entry_price))
+
+
+# ---- test_short_entry_on_channel_low_break ----
+
+def test_short_entry_on_channel_low_break():
+    """Price breaks below channel low with volume -> SELL signal (short entry)."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+    }, {})
+
+    _build_channel_for_short(s)
+
+    # Channel low = min of lows over last 5 days (excluding current).
+    # With descending prices from 105, lows are: 103,102,101,100,99,98,97,96
+    # Channel period=5, so we look at lows[-(5+1):-1] = last 6 excluding last = indices 2..7
+    # lows at indices 2..6 = 101,100,99,98,97 -> channel_low = 97
+    # We need price < 97 to trigger short entry
+    entry_price = 90.0  # well below channel low
+    signals = _enter_short_position(s, entry_price=entry_price)
+
+    sell_signals = [sig for sig in signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    assert sell_signals[0].quantity > 0
+    assert s.in_position["TEST"] is True
+    assert s.is_short["TEST"] is True
+
+    # Verify risk-based sizing
+    atr = s.current_atr["TEST"]
+    expected_qty = int((100_000.0 * 0.02) / (atr * 1.5))
+    assert sell_signals[0].quantity == expected_qty
+
+
+# ---- test_short_no_entry_without_volume ----
+
+def test_short_no_entry_without_volume():
+    """No short entry when volume < avg_volume * volume_factor."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "volume_factor": 2.0,
+    }, {})
+
+    _build_channel_for_short(s, volume=100_000)
+    # Price below channel low, but volume_factor=2.0 needs >= 200k
+    signals = s.on_bar(make_snapshot(100, close_15m=90.0))
+    assert not any(sig.action == "SELL" for sig in signals)
+
+
+# ---- test_short_trailing_stop_exit ----
+
+def test_short_trailing_stop_exit():
+    """Short position: price rises above trailing stop -> BUY to cover."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "max_loss_pct": 0.50,  # high so max loss doesn't trigger
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    entry_qty = sell_signals[0].quantity
+    entry_price = 90.0
+    atr = s.current_atr["TEST"]
+
+    # Initial trailing stop for short = entry + atr * multiplier
+    expected_stop = entry_price + atr * 1.5
+    assert abs(s.trailing_stop["TEST"] - expected_stop) < 0.01
+
+    # Price drops further -> lowest_since_entry updates, trailing stop moves down
+    s.on_bar(make_snapshot(101, close_15m=85.0))
+    new_expected_stop = 85.0 + atr * 1.5
+    assert s.trailing_stop["TEST"] <= new_expected_stop + 0.01
+
+    # Price rises above trailing stop -> should cover
+    stop_level = s.trailing_stop["TEST"]
+    rise_price = stop_level + 1.0
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(102, close_15m=rise_price, positions=[held]))
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == entry_qty
+
+
+# ---- test_short_channel_high_exit ----
+
+def test_short_channel_high_exit():
+    """Short position: price breaks above channel high -> BUY to cover (trend reversal)."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "max_loss_pct": 0.50,  # high so max loss doesn't trigger
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    entry_qty = sell_signals[0].quantity
+
+    # Channel high = max of highs over last 5+1 days excluding last
+    # highs descending: 107,106,105,104,103,102,101,100 + breakout day
+    # channel_high is around 105-107 depending on window
+    # We set price well above any channel high
+    cover_price = 120.0
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=90.0, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(101, close_15m=cover_price, positions=[held]))
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == entry_qty
+    # Position should be reset
+    assert s.in_position["TEST"] is False
+
+
+# ---- test_short_max_loss_exit ----
+
+def test_short_max_loss_exit():
+    """Short position: price > avg_entry * (1 + max_loss_pct) -> cover all."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 100.0,  # huge so trailing stop won't trigger
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "max_loss_pct": 0.02,
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    entry_qty = sell_signals[0].quantity
+    entry_price = 90.0
+
+    # Max loss for short: price > entry * (1 + 0.02) = 90 * 1.02 = 91.8
+    loss_price = entry_price * (1 + 0.02) + 1.0  # well above max loss
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(101, close_15m=loss_price, positions=[held]))
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == entry_qty
+
+
+# ---- test_short_partial_cover ----
+
+def test_short_partial_cover():
+    """Short position: price drops to profit target -> cover 1/3, stop moves to breakeven."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "profit_target_atr": 2.0,
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    entry_qty = sell_signals[0].quantity
+    entry_price = 90.0
+    atr = s.current_atr["TEST"]
+
+    # Profit target for short: price <= entry - profit_target_atr * ATR
+    target_price = entry_price - 2.0 * atr - 1.0  # slightly below target
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(101, close_15m=target_price, positions=[held]))
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    expected_partial = max(1, entry_qty // 3)
+    assert buy_signals[0].quantity == expected_partial
+
+    # Trailing stop moved to breakeven
+    assert s.partial_taken["TEST"] is True
+    assert abs(s.trailing_stop["TEST"] - entry_price) < 0.01
+
+
+# ---- test_short_pyramid ----
+
+def test_short_pyramid():
+    """Short position: price drops 1*ATR below entry -> add 50% more shorts."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "pyramid_levels": 2, "profit_target_atr": 10.0,  # high so partial doesn't trigger
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    original_qty = sell_signals[0].quantity
+    entry_price = 90.0
+    atr = s.current_atr["TEST"]
+
+    # Price drops below entry - ATR -> pyramid trigger
+    pyramid_price = entry_price - atr - 1.0
+    held = Position(symbol="TEST", quantity=-original_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(101, close_15m=pyramid_price, positions=[held]))
+
+    # Pyramid adds more short (SELL signal)
+    sell_signals = [sig for sig in signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    expected_add = max(1, original_qty // 2)
+    assert sell_signals[0].quantity == expected_add
+    assert s.pyramid_count["TEST"] == 1
+
+
+# ---- test_short_time_stop ----
+
+def test_short_time_stop():
+    """Short position: held too long with minimal gain -> cover all."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 100.0,  # huge so trailing won't trigger
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "max_loss_pct": 0.50,  # high so max loss won't trigger
+        "max_hold_bars": 5,
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    entry_qty = sell_signals[0].quantity
+    entry_price = 90.0
+
+    # Feed bars without hitting any exit, to accumulate bar count.
+    # Must pass position so reconciliation doesn't reset the short.
+    # entry_bar = bar_counter at entry. We need bars_held > max_hold_bars (5).
+    # Feed exactly 5 bars (bars_held = 5, not yet > 5), then the 6th triggers.
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    for i in range(5):
+        s.on_bar(make_snapshot(101 + i, close_15m=entry_price, positions=[held]))
+
+    # Now bars_held = 6 (> 5), price at entry (gain = 0% < 0.5%) -> time stop
+    signals = s.on_bar(make_snapshot(200, close_15m=entry_price, positions=[held]))
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == entry_qty
+
+
+# ---- test_no_short_when_already_long ----
+
+def test_no_short_when_already_long():
+    """Cannot enter short while in a long position."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 100.0,  # huge trailing stop
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "max_loss_pct": 0.90,
+    }, {})
+
+    _build_channel(s)
+    entry_signals = _enter_position(s)
+    assert any(sig.action == "BUY" for sig in entry_signals)
+    assert s.in_position["TEST"] is True
+    assert s.is_short["TEST"] is False
+
+    # Try to get a short signal by feeding a low price (below channel_low)
+    # Should not trigger because we are already in a long position
+    held = Position(symbol="TEST", quantity=100, avg_price=108.0, unrealized_pnl=0.0)
+    signals = s.on_bar(make_snapshot(200, close_15m=80.0, positions=[held]))
+
+    # Should get a SELL exit (long exit via channel low), NOT a short entry
+    sell_signals = [sig for sig in signals if sig.action == "SELL"]
+    assert len(sell_signals) == 1
+    # After exit, position should be reset (not short)
+    assert s.in_position["TEST"] is False
