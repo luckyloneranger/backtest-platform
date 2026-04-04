@@ -104,6 +104,14 @@ class DonchianBreakout(Strategy):
         for symbol, bar in snapshot.timeframes["15minute"].items():
             self._ensure_state(symbol)
 
+            # Reconcile in_position flag with portfolio on order rejection
+            if self.in_position[symbol]:
+                held = any(p.symbol == symbol and p.quantity > 0 for p in snapshot.portfolio.positions)
+                if not held:
+                    self.in_position[symbol] = False
+                    self.trailing_stop[symbol] = 0.0
+                    self.highest_since_entry[symbol] = 0.0
+
             closes = list(self.daily_closes.get(symbol, []))
             highs = list(self.daily_highs.get(symbol, []))
             lows = list(self.daily_lows.get(symbol, []))

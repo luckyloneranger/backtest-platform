@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch, MagicMock
 
 import pytest
+import requests
 
 from strategies.llm_client import AzureOpenAIClient, LLMClientError
 
@@ -135,6 +136,47 @@ def test_chat_completion_max_retries_exceeded():
     error_response.text = "Internal Server Error"
 
     with patch("strategies.llm_client.requests.post", return_value=error_response):
+        with patch("time.sleep"):
+            with pytest.raises(LLMClientError, match="after 2 retries"):
+                client.chat_completion(messages=[{"role": "user", "content": "test"}])
+
+
+def test_chat_completion_network_error_retries():
+    """Network errors (RequestException) trigger retry, succeed on next attempt."""
+    client = AzureOpenAIClient(
+        endpoint="https://test.openai.azure.com",
+        api_key="test-key",
+        deployment="gpt-4o",
+    )
+
+    success_response = MagicMock()
+    success_response.status_code = 200
+    success_response.json.return_value = {
+        "choices": [{"message": {"content": "[]"}}]
+    }
+
+    with patch(
+        "strategies.llm_client.requests.post",
+        side_effect=[requests.exceptions.ConnectionError("connection refused"), success_response],
+    ):
+        with patch("time.sleep"):
+            result = client.chat_completion(messages=[{"role": "user", "content": "test"}])
+            assert result == "[]"
+
+
+def test_chat_completion_network_error_exhausts_retries():
+    """Persistent network errors exhaust retries and raise LLMClientError."""
+    client = AzureOpenAIClient(
+        endpoint="https://test.openai.azure.com",
+        api_key="test-key",
+        deployment="gpt-4o",
+        max_retries=2,
+    )
+
+    with patch(
+        "strategies.llm_client.requests.post",
+        side_effect=requests.exceptions.ConnectionError("connection refused"),
+    ):
         with patch("time.sleep"):
             with pytest.raises(LLMClientError, match="after 2 retries"):
                 client.chat_completion(messages=[{"role": "user", "content": "test"}])

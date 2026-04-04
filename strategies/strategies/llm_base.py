@@ -57,7 +57,7 @@ class LLMStrategy(Strategy):
 
         # Portfolio
         p = snapshot.portfolio
-        lines.append(f"Portfolio: cash={p.cash:.0f}, equity={p.equity:.0f}")
+        lines.append(f"Portfolio: cash={p.cash:.2f}, equity={p.equity:.2f}")
         if p.positions:
             for pos in p.positions:
                 lines.append(
@@ -100,6 +100,8 @@ class LLMStrategy(Strategy):
         Expects a JSON array. Handles markdown code blocks.
         Returns empty list on parse failure.
         """
+        VALID_ORDER_TYPES = {"MARKET", "LIMIT", "SL", "SL_M"}
+        VALID_PRODUCT_TYPES = {"CNC", "MIS", "NRML"}
         # Try to extract JSON from markdown code block
         md_match = re.search(
             r"```(?:json)?\s*\n?(.*?)\n?```", llm_response, re.DOTALL
@@ -127,14 +129,22 @@ class LLMStrategy(Strategy):
             if action == "HOLD":
                 continue
 
+            order_type = item.get("order_type", "MARKET").upper()
+            if order_type not in VALID_ORDER_TYPES:
+                order_type = "MARKET"
+
+            product_type = item.get("product_type", "CNC").upper()
+            if product_type not in VALID_PRODUCT_TYPES:
+                product_type = "CNC"
+
             signals.append(Signal(
                 action=action,
                 symbol=item.get("symbol", ""),
                 quantity=int(item.get("quantity", 0)),
-                order_type=item.get("order_type", "MARKET").upper(),
+                order_type=order_type,
                 limit_price=float(item.get("limit_price", 0.0)),
                 stop_price=float(item.get("stop_price", 0.0)),
-                product_type=item.get("product_type", "CNC").upper(),
+                product_type=product_type,
             ))
 
         return signals

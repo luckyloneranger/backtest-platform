@@ -1,6 +1,8 @@
 from strategies.base import BarData, MarketSnapshot, Portfolio, Signal, SessionContext, InstrumentInfo
 from strategies.deterministic.sma_crossover import SmaCrossover
 
+import pytest
+
 
 def make_snapshot(ts: int, close: float, symbol: str = "TEST") -> MarketSnapshot:
     bar = BarData(symbol, close, close, close, close, 1000, 0)
@@ -45,3 +47,17 @@ def test_sell_signal_on_death_cross():
         signals = s.on_bar(make_snapshot(i, float(p)))
         all_signals.extend(signals)
     assert any(sig.action == "SELL" for sig in all_signals)
+
+
+def test_fast_period_ge_slow_period_raises():
+    """initialize raises ValueError when fast_period >= slow_period."""
+    s = SmaCrossover()
+    with pytest.raises(ValueError, match="fast_period"):
+        s.initialize({"fast_period": 30, "slow_period": 10}, {})
+
+
+def test_fast_period_equal_slow_period_raises():
+    """initialize raises ValueError when fast_period == slow_period."""
+    s = SmaCrossover()
+    with pytest.raises(ValueError, match="fast_period"):
+        s.initialize({"fast_period": 10, "slow_period": 10}, {})

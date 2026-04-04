@@ -63,7 +63,7 @@ def test_format_snapshot_includes_key_data():
         text = s.format_snapshot(snap)
         assert "RELIANCE" in text
         assert "105.5" in text
-        assert "500000" in text or "500,000" in text or "500_000" in text
+        assert "500000.00" in text
 
 
 def test_parse_signals_valid_json():
@@ -145,3 +145,44 @@ def test_on_bar_llm_error_returns_empty():
         snap = make_snapshot()
         signals = s.on_bar(snap)
         assert signals == []
+
+
+def test_parse_signals_invalid_order_type_defaults_to_market():
+    """Invalid order_type from LLM is replaced with MARKET."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "TEST", "quantity": 10, "order_type": "FOO"},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 1
+        assert signals[0].order_type == "MARKET"
+
+
+def test_parse_signals_invalid_product_type_defaults_to_cnc():
+    """Invalid product_type from LLM is replaced with CNC."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "TEST", "quantity": 10, "product_type": "INVALID"},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 1
+        assert signals[0].product_type == "CNC"
+
+
+def test_parse_signals_valid_order_and_product_types_preserved():
+    """Valid order_type and product_type values are preserved."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "TEST", "quantity": 10,
+             "order_type": "LIMIT", "product_type": "MIS", "limit_price": 100.0},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 1
+        assert signals[0].order_type == "LIMIT"
+        assert signals[0].product_type == "MIS"

@@ -69,7 +69,13 @@ class AzureOpenAIClient:
 
         last_error = None
         for attempt in range(self.max_retries):
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+            except requests.exceptions.RequestException as e:
+                last_error = f"Network error: {e}"
+                wait = 2 ** attempt
+                time.sleep(wait)
+                continue
 
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]

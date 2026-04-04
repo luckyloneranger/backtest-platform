@@ -20,6 +20,10 @@ class SmaCrossover(Strategy):
     def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
         self.fast_period = config.get("fast_period", 10)
         self.slow_period = config.get("slow_period", 30)
+        if self.fast_period >= self.slow_period:
+            raise ValueError(
+                f"fast_period ({self.fast_period}) must be less than slow_period ({self.slow_period})"
+            )
         self.prices: dict[str, deque[float]] = {}
         self.prev_fast_above: dict[str, bool | None] = {}
 

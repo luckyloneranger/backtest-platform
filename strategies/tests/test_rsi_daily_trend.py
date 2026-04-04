@@ -127,14 +127,16 @@ def test_sell_on_rsi_overbought():
     for i in range(5):
         s.on_bar(make_snapshot(i, close_day=100.0 + i * 2))
 
-    # Drop to trigger buy
+    # Drop to trigger buy — include a position in portfolio so that
+    # the in_position reconciliation (Bug 8 fix) keeps the flag True
+    # after the BUY signal is emitted.
+    held = Position(symbol="TEST", quantity=200, avg_price=90.0, unrealized_pnl=0.0)
     prices_down = [100, 102, 104, 106, 108, 110, 105, 100, 95, 90]
     for i, p in enumerate(prices_down):
-        s.on_bar(make_snapshot(100 + i, close_15m=float(p)))
+        s.on_bar(make_snapshot(100 + i, close_15m=float(p), positions=[held]))
 
     # Rise to trigger overbought sell
     prices_up = [92, 95, 100, 105, 110, 115, 120, 125, 130, 135]
-    held = Position(symbol="TEST", quantity=200, avg_price=90.0, unrealized_pnl=0.0)
     all_signals = []
     for i, p in enumerate(prices_up):
         signals = s.on_bar(make_snapshot(200 + i, close_15m=float(p), positions=[held]))

@@ -24,7 +24,13 @@ from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal
 
 
 def compute_rsi(prices: list[float], period: int) -> float | None:
-    """Compute RSI from a list of prices. Returns None if not enough data."""
+    """Compute RSI using simple moving average of gains/losses (Cutler's RSI).
+
+    Note: This is NOT Wilder's smoothed RSI used by most charting platforms.
+    Values will differ from TradingView/Bloomberg RSI, especially for short periods.
+
+    Returns None if not enough data.
+    """
     if len(prices) < period + 1:
         return None
 
@@ -106,6 +112,12 @@ class RsiDailyTrend(Strategy):
             return signals
 
         for symbol, bar in snapshot.timeframes["15minute"].items():
+            # Reconcile in_position flag with portfolio on order rejection
+            if symbol in self.in_position and self.in_position[symbol]:
+                held = any(p.symbol == symbol and p.quantity > 0 for p in snapshot.portfolio.positions)
+                if not held:
+                    self.in_position[symbol] = False
+
             if symbol not in self.prices_15m:
                 self.prices_15m[symbol] = deque(maxlen=self.rsi_period + 10)
                 self.in_position[symbol] = False
