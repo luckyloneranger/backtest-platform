@@ -6,11 +6,12 @@ use chrono::NaiveDate;
 use clap::Parser;
 
 use backtest_core::config::BacktestConfig;
-use backtest_core::engine::{BacktestEngine, IntervalRequirement, StrategyClient};
+use backtest_core::engine::{BacktestEngine, InstrumentData, IntervalRequirement, StrategyClient};
 use backtest_core::grpc_client::GrpcStrategyClient;
 use backtest_core::reporter::Reporter;
-use backtest_core::types::Interval;
+use backtest_core::types::{Exchange, Interval};
 use backtest_data::candles::CandleStore;
+use backtest_data::instruments::InstrumentStore;
 
 #[derive(Parser)]
 pub struct RunArgs {
@@ -53,6 +54,10 @@ pub struct RunArgs {
     /// Number of historical bars to keep per symbol for strategy lookback
     #[arg(long, default_value = "200")]
     pub lookback: usize,
+
+    /// Exchange (NSE, BSE, MCX)
+    #[arg(long, default_value = "NSE")]
+    pub exchange: String,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -126,7 +131,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         let mut interval_bars = Vec::new();
 
         for symbol in &args.symbols {
-            let bars = store.read("NSE", symbol, req_interval, Some(from_ms), Some(to_ms))?;
+            let bars = store.read(&args.exchange, symbol, req_interval, Some(from_ms), Some(to_ms))?;
             if bars.is_empty() {
                 eprintln!(
                     "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
@@ -147,6 +152,59 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         anyhow::bail!("no candle data found for any symbol/interval. Cannot run backtest.");
     }
 
+    // Load instrument metadata from SQLite (graceful degradation if unavailable)
+    let instruments = {
+        let db_path = Path::new("./data/instruments.db");
+        let exchange = match args.exchange.as_str() {
+            "NSE" => Some(Exchange::Nse),
+            "BSE" => Some(Exchange::Bse),
+            "MCX" => Some(Exchange::Mcx),
+            _ => None,
+        };
+        if db_path.exists() {
+            match InstrumentStore::open(db_path) {
+                Ok(inst_store) => {
+                    let mut insts = Vec::new();
+                    if let Some(ex) = exchange {
+                        for symbol in &args.symbols {
+                            if let Ok(Some(inst)) = inst_store.find(symbol, ex) {
+                                insts.push(InstrumentData {
+                                    symbol: inst.tradingsymbol.clone(),
+                                    exchange: args.exchange.clone(),
+                                    instrument_type: match inst.instrument_type {
+                                        backtest_core::types::InstrumentType::Equity => "EQ".to_string(),
+                                        backtest_core::types::InstrumentType::FutureFO => "FUT".to_string(),
+                                        backtest_core::types::InstrumentType::OptionFO => "OPT".to_string(),
+                                        backtest_core::types::InstrumentType::Commodity => "COM".to_string(),
+                                    },
+                                    lot_size: inst.lot_size,
+                                    tick_size: inst.tick_size,
+                                    expiry: inst.expiry.unwrap_or_default(),
+                                    strike: inst.strike.unwrap_or(0.0),
+                                    option_type: inst.option_type.unwrap_or_default(),
+                                    circuit_limit_upper: 0.0,
+                                    circuit_limit_lower: 0.0,
+                                });
+                            } else {
+                                eprintln!(
+                                    "Warning: instrument metadata not found for {} on {}",
+                                    symbol, args.exchange
+                                );
+                            }
+                        }
+                    }
+                    insts
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not open instruments.db: {e}");
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        }
+    };
+
     // Run backtest
     println!(
         "Running backtest: strategy={}, symbols={}, {} to {}",
@@ -157,7 +215,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
     );
 
     let result =
-        BacktestEngine::run(config, bars_by_interval, &strategy, vec![], &requirements).await?;
+        BacktestEngine::run(config, bars_by_interval, &strategy, instruments, &requirements).await?;
 
     // Save results
     let reporter = Reporter::new(Path::new("./results"));

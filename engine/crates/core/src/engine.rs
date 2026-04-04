@@ -145,6 +145,21 @@ impl BacktestEngine {
         let mut portfolio = PortfolioManager::new(config.initial_capital);
         let mut matcher = OrderMatcher::new(config.slippage_pct);
 
+        // Build instrument type lookup from provided instruments
+        let instrument_type_map: HashMap<String, InstrumentType> = instruments
+            .iter()
+            .filter_map(|inst| {
+                let itype = match inst.instrument_type.as_str() {
+                    "EQ" => Some(InstrumentType::Equity),
+                    "FUT" => Some(InstrumentType::FutureFO),
+                    "OPT" => Some(InstrumentType::OptionFO),
+                    "COM" => Some(InstrumentType::Commodity),
+                    _ => None,
+                };
+                itype.map(|t| (inst.symbol.clone(), t))
+            })
+            .collect();
+
         // 3. Determine the finest interval (most bars per day = finest granularity)
         let finest_interval_str = requirements
             .iter()
@@ -213,8 +228,12 @@ impl BacktestEngine {
                 for fill in &fills {
                     let trade_value = fill.quantity as f64 * fill.fill_price;
                     let is_intraday = fill.product_type == ProductType::Mis;
+                    let inst_type = instrument_type_map
+                        .get(&fill.symbol)
+                        .copied()
+                        .unwrap_or(InstrumentType::Equity);
                     let params = TradeParams {
-                        instrument_type: InstrumentType::Equity, // default for now
+                        instrument_type: inst_type,
                         is_intraday,
                         buy_value: if fill.side == Side::Buy {
                             trade_value
