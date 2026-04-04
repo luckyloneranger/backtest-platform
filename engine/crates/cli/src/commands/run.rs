@@ -122,31 +122,46 @@ pub async fn handle(args: RunArgs) -> Result<()> {
             }]
         });
 
-    // Read candles from CandleStore at ./data/ for each required interval
+    // Read candles from CandleStore at ./data/ for each required interval.
+    // Split into warmup bars (pre-populate lookback) and active bars (engine ticks through).
     let store = CandleStore::new(Path::new("./data"));
     let mut bars_by_interval: HashMap<String, Vec<backtest_core::types::Bar>> = HashMap::new();
+    let mut initial_lookback: HashMap<(String, String), std::collections::VecDeque<backtest_core::types::Bar>> = HashMap::new();
 
     for req in &requirements {
         let req_interval = parse_interval(&req.interval)?;
         let mut interval_bars = Vec::new();
 
-        // Extend from_ms backwards to include lookback warmup bars.
-        // Convert lookback bars to calendar days, add 50% margin for weekends/holidays.
+        // Compute how far back to reach for lookback warmup data.
         let bars_per_day = req_interval.bars_per_day().max(1) as i64;
-        let lookback_days = ((req.lookback as i64 / bars_per_day) + 1) * 3 / 2; // +50% margin
+        let lookback_days = ((req.lookback as i64 / bars_per_day) + 1) * 3 / 2; // +50% margin for weekends/holidays
         let lookback_ms = lookback_days * 86_400_000;
         let adjusted_from_ms = from_ms - lookback_ms;
 
         for symbol in &args.symbols {
-            let bars = store.read(&args.exchange, symbol, req_interval, Some(adjusted_from_ms), Some(to_ms))?;
-            if bars.is_empty() {
+            // Load warmup bars (fill lookback buffer, no on_bar calls)
+            let warmup_bars = store.read(&args.exchange, symbol, req_interval, Some(adjusted_from_ms), Some(from_ms))?;
+            if !warmup_bars.is_empty() {
+                let key = (symbol.clone(), req.interval.clone());
+                let buf = initial_lookback.entry(key).or_insert_with(std::collections::VecDeque::new);
+                for bar in warmup_bars {
+                    buf.push_back(bar);
+                    if buf.len() > req.lookback {
+                        buf.pop_front();
+                    }
+                }
+            }
+
+            // Load active bars (engine ticks through these, calling on_bar)
+            let active_bars = store.read(&args.exchange, symbol, req_interval, Some(from_ms), Some(to_ms))?;
+            if active_bars.is_empty() && initial_lookback.get(&(symbol.clone(), req.interval.clone())).map_or(true, |b| b.is_empty()) {
                 eprintln!(
                     "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
                     symbol,
                     req.interval,
                 );
             }
-            interval_bars.extend(bars);
+            interval_bars.extend(active_bars);
         }
 
         // Sort bars by timestamp for proper event ordering
@@ -222,7 +237,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
     );
 
     let result =
-        BacktestEngine::run(config, bars_by_interval, &strategy, instruments, &requirements).await?;
+        BacktestEngine::run(config, bars_by_interval, initial_lookback, &strategy, instruments, &requirements).await?;
 
     // Save results
     let reporter = Reporter::new(Path::new("./results"));

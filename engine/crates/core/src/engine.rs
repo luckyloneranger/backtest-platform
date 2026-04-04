@@ -126,6 +126,7 @@ impl BacktestEngine {
     pub async fn run(
         config: BacktestConfig,
         bars_by_interval: HashMap<String, Vec<Bar>>,
+        initial_lookback: HashMap<(String, String), VecDeque<Bar>>,
         strategy: &dyn StrategyClient,
         instruments: Vec<InstrumentData>,
         requirements: &[IntervalRequirement],
@@ -196,8 +197,8 @@ impl BacktestEngine {
         // so we only emit a new bar when a new candle appears
         let mut last_coarse_ts: HashMap<String, i64> = HashMap::new();
 
-        // 6. Lookback buffers per (symbol, interval)
-        let mut lookback: HashMap<(String, String), VecDeque<Bar>> = HashMap::new();
+        // 6. Lookback buffers per (symbol, interval) — start with pre-populated warmup data
+        let mut lookback: HashMap<(String, String), VecDeque<Bar>> = initial_lookback;
         let lookback_sizes: HashMap<String, usize> = requirements
             .iter()
             .map(|r| (r.interval.clone(), r.lookback))
@@ -519,7 +520,7 @@ mod tests {
         }];
 
         let result =
-            BacktestEngine::run(config, bars_by_interval, &client, vec![], &requirements)
+            BacktestEngine::run(config, bars_by_interval, HashMap::new(), &client, vec![], &requirements)
                 .await
                 .unwrap();
         assert_eq!(result.trades.len(), 1); // one round-trip trade (buy bar 5, sell bar 10)
@@ -592,6 +593,7 @@ mod tests {
                 lookback_window: 200,
             },
             bars_by_interval,
+            HashMap::new(),
             &HoldStrategy,
             vec![],
             &requirements,
@@ -674,6 +676,7 @@ mod tests {
                 lookback_window: 200,
             },
             bars_by_interval,
+            HashMap::new(),
             &BigBuyStrategy,
             vec![],
             &requirements,
@@ -776,6 +779,7 @@ mod tests {
                 lookback_window: 200,
             },
             bars_by_interval,
+            HashMap::new(),
             &BuySellStrategy::new(),
             vec![],
             &requirements,
@@ -887,6 +891,7 @@ mod tests {
                 lookback_window: 200,
             },
             bars_by_interval,
+            HashMap::new(),
             &MultiSymbolBuyStrategy::new(),
             vec![],
             &requirements,
