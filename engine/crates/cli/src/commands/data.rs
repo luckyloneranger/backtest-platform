@@ -5,6 +5,7 @@ use chrono::{FixedOffset, NaiveDate};
 use clap::Subcommand;
 use rand::Rng;
 
+use backtest_core::calendar::TradingCalendar;
 use backtest_core::types::{Bar, Exchange, Interval};
 use backtest_data::candles::CandleStore;
 use backtest_data::instruments::InstrumentStore;
@@ -271,11 +272,18 @@ fn handle_generate_test_data(
     let mut prev_close = start_price;
 
     let ist = FixedOffset::east_opt(19800).unwrap(); // IST = UTC+5:30
+    let calendar = TradingCalendar::nse();
 
     match interval_enum {
         Interval::Day => {
             let mut current_date = from_date;
             while current_date <= to_date {
+                // Skip non-trading days (weekends + NSE holidays)
+                if !calendar.is_trading_day(current_date) {
+                    current_date += chrono::Duration::days(1);
+                    continue;
+                }
+
                 let timestamp_ms = current_date
                     .and_hms_opt(0, 0, 0)
                     .unwrap()
@@ -305,6 +313,12 @@ fn handle_generate_test_data(
 
             let mut current_date = from_date;
             while current_date <= to_date {
+                // Skip non-trading days (weekends + NSE holidays)
+                if !calendar.is_trading_day(current_date) {
+                    current_date += chrono::Duration::days(1);
+                    continue;
+                }
+
                 // Indian market hours: 9:15 AM to 3:30 PM IST
                 let mut hour = 9;
                 let mut minute = 15;
