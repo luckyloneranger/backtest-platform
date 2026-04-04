@@ -19,6 +19,7 @@ class SymbolState:
     avg_entry: float = 0.0
     entry_bar: int = 0
     highest_since_entry: float = 0.0
+    lowest_since_entry: float = 0.0
     trailing_stop: float = 0.0
     position_qty: int = 0
     pyramid_count: int = 0
@@ -29,11 +30,14 @@ class SymbolState:
 @register("sma_crossover")
 class SmaCrossover(Strategy):
     """Trend-following SMA crossover strategy with ATR-based position sizing,
-    trailing stops, time stops, and pyramiding.
+    trailing stops, time stops, and pyramiding. Supports both long and short positions.
 
-    Entry: golden cross (fast SMA > slow SMA) with minimum trend spread.
-    Exit: death cross, trailing stop, or time stop.
-    Pyramiding: add to winning positions when price exceeds avg_entry + ATR.
+    Long entry: golden cross (fast SMA > slow SMA) with minimum trend spread.
+    Long exit: death cross, trailing stop, or time stop.
+    Short entry: death cross (fast SMA < slow SMA) with minimum trend spread.
+    Short exit: golden cross, trailing stop, or time stop.
+    Pyramiding: add to winning positions when price moves ATR beyond avg_entry.
+    Position tracking: positive position_qty = long, negative = short.
     """
 
     def required_data(self) -> list[dict]:
@@ -78,7 +82,7 @@ class SmaCrossover(Strategy):
                 actual_avg = pos.avg_price
                 break
 
-        if actual_qty == 0 and state.position_qty > 0:
+        if actual_qty == 0 and state.position_qty != 0:
             # Position was closed externally (e.g. by engine)
             state.position_qty = 0
             state.pyramid_count = 0
@@ -86,10 +90,11 @@ class SmaCrossover(Strategy):
             state.entry_price = 0.0
             state.avg_entry = 0.0
             state.highest_since_entry = 0.0
+            state.lowest_since_entry = 0.0
             state.trailing_stop = 0.0
             state.bars_in_position = 0
 
-        if actual_qty > 0:
+        if actual_qty != 0:
             state.position_qty = actual_qty
             state.avg_entry = actual_avg
 
@@ -135,7 +140,7 @@ class SmaCrossover(Strategy):
                 # 4. Reconcile position with portfolio
                 self._reconcile_position(state, snapshot.portfolio.positions, symbol)
 
-                # 5. If NOT in position: check entry
+                # 5. If FLAT: check for long entry (golden cross) or short entry (death cross)
                 if state.position_qty == 0:
                     if (
                         state.prev_fast_above is not None
@@ -159,13 +164,43 @@ class SmaCrossover(Strategy):
                                 state.avg_entry = bar.close
                                 state.entry_bar = self.bar_count
                                 state.highest_since_entry = bar.close
+                                state.lowest_since_entry = 0.0
                                 state.trailing_stop = bar.close - atr * self.atr_stop_multiplier
                                 state.position_qty = qty
                                 state.original_qty = qty
                                 state.pyramid_count = 0
                                 state.bars_in_position = 0
 
-                # 6. If IN position: check exits, then pyramiding
+                    elif (
+                        state.prev_fast_above is not None
+                        and not fast_above
+                        and state.prev_fast_above
+                    ):
+                        # Death cross detected - check trend strength for short entry
+                        spread = abs(fast_sma - slow_sma) / slow_sma
+                        if spread > self.min_spread and atr > 0:
+                            qty = self._compute_qty(snapshot.context.initial_capital, atr)
+                            if qty > 0:
+                                signals.append(
+                                    Signal(
+                                        action="SELL",
+                                        symbol=symbol,
+                                        quantity=qty,
+                                        product_type="CNC",
+                                    )
+                                )
+                                state.entry_price = bar.close
+                                state.avg_entry = bar.close
+                                state.entry_bar = self.bar_count
+                                state.highest_since_entry = 0.0
+                                state.lowest_since_entry = bar.close
+                                state.trailing_stop = bar.close + atr * self.atr_stop_multiplier
+                                state.position_qty = -qty  # negative = short
+                                state.original_qty = qty
+                                state.pyramid_count = 0
+                                state.bars_in_position = 0
+
+                # 6. If LONG: check exits, then pyramiding
                 elif state.position_qty > 0:
                     state.bars_in_position += 1
 
@@ -206,6 +241,7 @@ class SmaCrossover(Strategy):
                         state.entry_price = 0.0
                         state.avg_entry = 0.0
                         state.highest_since_entry = 0.0
+                        state.lowest_since_entry = 0.0
                         state.trailing_stop = 0.0
                         state.bars_in_position = 0
                     else:
@@ -232,7 +268,76 @@ class SmaCrossover(Strategy):
                             state.position_qty = total_qty
                             state.pyramid_count += 1
 
-                # 7. Update crossover state
+                # 7. If SHORT: check exits, then pyramiding (mirror of long logic)
+                elif state.position_qty < 0:
+                    state.bars_in_position += 1
+                    abs_qty = abs(state.position_qty)
+
+                    # Update trailing stop for short (only moves down)
+                    if bar.close < state.lowest_since_entry:
+                        state.lowest_since_entry = bar.close
+                    new_stop = state.lowest_since_entry + atr * self.atr_stop_multiplier
+                    if new_stop < state.trailing_stop:
+                        state.trailing_stop = new_stop
+
+                    cover_all = False
+                    # a. Golden cross exit (opposite crossover)
+                    if state.prev_fast_above is not None and fast_above and not state.prev_fast_above:
+                        cover_all = True
+
+                    # b. Trailing stop exit (price rises above trailing stop)
+                    if not cover_all and bar.close > state.trailing_stop:
+                        cover_all = True
+
+                    # c. Time stop exit
+                    if not cover_all and state.bars_in_position > self.max_hold_bars:
+                        gain = (state.avg_entry - bar.close) / state.avg_entry if state.avg_entry > 0 else 0.0
+                        if gain < 0.005:
+                            cover_all = True
+
+                    if cover_all:
+                        signals.append(
+                            Signal(
+                                action="BUY",
+                                symbol=symbol,
+                                quantity=abs_qty,
+                                product_type="CNC",
+                            )
+                        )
+                        state.position_qty = 0
+                        state.pyramid_count = 0
+                        state.original_qty = 0
+                        state.entry_price = 0.0
+                        state.avg_entry = 0.0
+                        state.highest_since_entry = 0.0
+                        state.lowest_since_entry = 0.0
+                        state.trailing_stop = 0.0
+                        state.bars_in_position = 0
+                    else:
+                        # Check short pyramid opportunity (price drops below avg_entry - ATR)
+                        if (
+                            state.pyramid_count < self.pyramid_levels
+                            and atr > 0
+                            and bar.close < state.avg_entry - atr
+                        ):
+                            add_qty = max(1, int(state.original_qty * 0.5))
+                            signals.append(
+                                Signal(
+                                    action="SELL",
+                                    symbol=symbol,
+                                    quantity=add_qty,
+                                    product_type="CNC",
+                                )
+                            )
+                            # Update average entry for short
+                            total_abs = abs_qty + add_qty
+                            state.avg_entry = (
+                                (state.avg_entry * abs_qty + bar.close * add_qty) / total_abs
+                            )
+                            state.position_qty = -(total_abs)
+                            state.pyramid_count += 1
+
+                # 8. Update crossover state
                 state.prev_fast_above = fast_above
 
         return signals
