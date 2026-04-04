@@ -55,27 +55,51 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
         except Exception as e:
             return strategy_pb2.InitResponse(success=False, error=str(e))
 
+    def GetRequirements(self, request, context):
+        try:
+            # Temporarily instantiate the strategy to get its requirements
+            strategy = get_strategy(request.strategy_name)
+
+            reqs = strategy.required_data()
+
+            proto_intervals = []
+            for req in reqs:
+                proto_intervals.append(strategy_pb2.IntervalRequirement(
+                    interval=req["interval"],
+                    lookback=req.get("lookback", 200),
+                ))
+
+            return strategy_pb2.DataRequirements(intervals=proto_intervals)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return strategy_pb2.DataRequirements()
+
     def OnBar(self, request, context):
         if self.strategy is None:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details("Strategy not initialized. Call Initialize first.")
             return strategy_pb2.BarResponse()
 
-        # Convert bars
-        bars = {}
-        for b in request.bars:
-            bars[b.symbol] = BarData(
-                symbol=b.symbol, open=b.open, high=b.high,
-                low=b.low, close=b.close, volume=b.volume, oi=b.oi,
-            )
+        # Convert timeframes
+        timeframes = {}
+        for tf in request.timeframes:
+            symbol_bars = {}
+            for b in tf.bars:
+                symbol_bars[b.symbol] = BarData(
+                    symbol=b.symbol, open=b.open, high=b.high,
+                    low=b.low, close=b.close, volume=b.volume, oi=b.oi,
+                )
+            timeframes[tf.interval] = symbol_bars
 
         # Convert history
         history = {}
-        for sh in request.history:
-            history[sh.symbol] = [
-                BarData(symbol=sh.symbol, open=b.open, high=b.high,
+        for th in request.history:
+            key = (th.symbol, th.interval)
+            history[key] = [
+                BarData(symbol=th.symbol, open=b.open, high=b.high,
                         low=b.low, close=b.close, volume=b.volume, oi=b.oi)
-                for b in sh.bars
+                for b in th.bars
             ]
 
         # Convert portfolio
@@ -127,13 +151,13 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             total_bars=request.context.total_bars,
             start_date=request.context.start_date,
             end_date=request.context.end_date,
-            interval=request.context.interval,
+            intervals=list(request.context.intervals),
             lookback_window=request.context.lookback_window,
         )
 
         snapshot = MarketSnapshot(
             timestamp_ms=request.timestamp_ms,
-            bars=bars,
+            timeframes=timeframes,
             history=history,
             portfolio=portfolio,
             instruments=instruments,
