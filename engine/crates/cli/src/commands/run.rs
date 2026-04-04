@@ -49,13 +49,9 @@ pub struct RunArgs {
     pub slippage: f64,
 }
 
-/// Parse an interval string ("day" or "minute") into the Interval enum.
+/// Parse an interval string into the Interval enum (delegates to shared helper).
 fn parse_interval(s: &str) -> Result<Interval> {
-    match s {
-        "day" => Ok(Interval::Day),
-        "minute" => Ok(Interval::Minute),
-        _ => anyhow::bail!("unsupported interval '{}'. Use 'day' or 'minute'.", s),
-    }
+    super::parse_interval(s)
 }
 
 pub async fn handle(args: RunArgs) -> Result<()> {

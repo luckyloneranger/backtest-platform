@@ -145,6 +145,12 @@ pub struct Instrument {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Interval {
     Minute,
+    Minute3,
+    Minute5,
+    Minute10,
+    Minute15,
+    Minute30,
+    Minute60,
     Day,
 }
 
@@ -153,7 +159,27 @@ impl Interval {
     pub fn as_kite_str(&self) -> &'static str {
         match self {
             Interval::Minute => "minute",
+            Interval::Minute3 => "3minute",
+            Interval::Minute5 => "5minute",
+            Interval::Minute10 => "10minute",
+            Interval::Minute15 => "15minute",
+            Interval::Minute30 => "30minute",
+            Interval::Minute60 => "60minute",
             Interval::Day => "day",
+        }
+    }
+
+    /// Number of candle bars in a single Indian trading session (9:15 to 15:30 = 375 minutes).
+    pub fn bars_per_day(&self) -> usize {
+        match self {
+            Interval::Minute => 375,
+            Interval::Minute3 => 125,
+            Interval::Minute5 => 75,
+            Interval::Minute10 => 38,
+            Interval::Minute15 => 25,
+            Interval::Minute30 => 13,
+            Interval::Minute60 => 7,
+            Interval::Day => 1,
         }
     }
 }
@@ -305,5 +331,29 @@ mod tests {
     fn interval_as_kite_str() {
         assert_eq!(Interval::Minute.as_kite_str(), "minute");
         assert_eq!(Interval::Day.as_kite_str(), "day");
+    }
+
+    #[test]
+    fn interval_all_kite_str_variants() {
+        assert_eq!(Interval::Minute.as_kite_str(), "minute");
+        assert_eq!(Interval::Minute3.as_kite_str(), "3minute");
+        assert_eq!(Interval::Minute5.as_kite_str(), "5minute");
+        assert_eq!(Interval::Minute10.as_kite_str(), "10minute");
+        assert_eq!(Interval::Minute15.as_kite_str(), "15minute");
+        assert_eq!(Interval::Minute30.as_kite_str(), "30minute");
+        assert_eq!(Interval::Minute60.as_kite_str(), "60minute");
+        assert_eq!(Interval::Day.as_kite_str(), "day");
+    }
+
+    #[test]
+    fn interval_bars_per_day() {
+        assert_eq!(Interval::Minute.bars_per_day(), 375);
+        assert_eq!(Interval::Minute3.bars_per_day(), 125);
+        assert_eq!(Interval::Minute5.bars_per_day(), 75);
+        assert_eq!(Interval::Minute10.bars_per_day(), 38);
+        assert_eq!(Interval::Minute15.bars_per_day(), 25);
+        assert_eq!(Interval::Minute30.bars_per_day(), 13);
+        assert_eq!(Interval::Minute60.bars_per_day(), 7);
+        assert_eq!(Interval::Day.bars_per_day(), 1);
     }
 }

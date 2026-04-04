@@ -42,13 +42,9 @@ pub enum DataCommands {
     },
 }
 
-/// Parse an interval string ("day" or "minute") into the Interval enum.
+/// Parse an interval string into the Interval enum (delegates to shared helper).
 fn parse_interval(s: &str) -> Result<Interval> {
-    match s {
-        "day" => Ok(Interval::Day),
-        "minute" => Ok(Interval::Minute),
-        _ => anyhow::bail!("unsupported interval '{}'. Use 'day' or 'minute'.", s),
-    }
+    super::parse_interval(s)
 }
 
 pub async fn handle(cmd: DataCommands) -> Result<()> {
@@ -137,10 +133,9 @@ fn handle_list() -> Result<()> {
                 }
 
                 // Read the bars to get the date range
-                let interval_enum = match interval_str.as_str() {
-                    "day" => Interval::Day,
-                    "minute" => Interval::Minute,
-                    _ => continue,
+                let interval_enum = match parse_interval(&interval_str) {
+                    Ok(i) => i,
+                    Err(_) => continue, // skip unknown interval directories
                 };
 
                 let store = CandleStore::new(data_path);
@@ -223,11 +218,22 @@ fn handle_generate_test_data(
                 current_date += chrono::Duration::days(1);
             }
         }
-        Interval::Minute => {
+        _ => {
+            // All intraday intervals
+            let step_minutes: u32 = match interval_enum {
+                Interval::Minute => 1,
+                Interval::Minute3 => 3,
+                Interval::Minute5 => 5,
+                Interval::Minute10 => 10,
+                Interval::Minute15 => 15,
+                Interval::Minute30 => 30,
+                Interval::Minute60 => 60,
+                Interval::Day => unreachable!(),
+            };
+
             let mut current_date = from_date;
             while current_date <= to_date {
                 // Indian market hours: 9:15 AM to 3:30 PM IST
-                // Generate minute bars for each trading day
                 let mut hour = 9;
                 let mut minute = 15;
 
@@ -242,10 +248,10 @@ fn handle_generate_test_data(
                     prev_close = bar.close;
                     bars.push(bar);
 
-                    minute += 1;
+                    minute += step_minutes;
                     if minute >= 60 {
-                        minute = 0;
-                        hour += 1;
+                        hour += minute / 60;
+                        minute %= 60;
                     }
                 }
 
