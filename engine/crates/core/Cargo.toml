@@ -1,0 +1,12 @@
+[package]
+name = "backtest-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+backtest-proto = { path = "../proto" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true

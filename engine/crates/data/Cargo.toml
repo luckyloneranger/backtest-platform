@@ -1,0 +1,16 @@
+[package]
+name = "backtest-data"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+backtest-core = { path = "../core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+arrow = "54"
+parquet = { version = "54", features = ["arrow"] }
