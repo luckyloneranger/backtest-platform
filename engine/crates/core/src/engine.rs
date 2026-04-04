@@ -26,6 +26,16 @@ pub struct InstrumentData {
     pub circuit_limit_lower: f64,
 }
 
+// ── IntervalRequirement ────────────────────────────────────────────────────
+
+/// Describes a timeframe interval that a strategy requires, along with
+/// how many historical bars to retain for that interval.
+#[derive(Debug, Clone)]
+pub struct IntervalRequirement {
+    pub interval: String,    // "minute", "5minute", "day"
+    pub lookback: usize,
+}
+
 // ── SessionContext ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -35,7 +45,7 @@ pub struct SessionContext {
     pub total_bars: i32,
     pub start_date: String,
     pub end_date: String,
-    pub interval: String,
+    pub intervals: Vec<String>,
     pub lookback_window: i32,
 }
 
@@ -45,8 +55,11 @@ pub struct SessionContext {
 #[derive(Debug, Clone)]
 pub struct MarketSnapshot {
     pub timestamp_ms: i64,
-    pub bars: HashMap<String, Bar>,
-    pub history: HashMap<String, Vec<Bar>>,
+    /// Bars grouped by interval -> symbol -> bar. Only intervals that have
+    /// a bar at this timestamp are included.
+    pub timeframes: HashMap<String, HashMap<String, Bar>>,
+    /// Lookback history keyed by (symbol, interval) -> bars.
+    pub history: HashMap<(String, String), Vec<Bar>>,
     pub portfolio: Portfolio,
     pub instruments: Vec<InstrumentData>,
     pub fills: Vec<Fill>,
@@ -59,6 +72,9 @@ pub struct MarketSnapshot {
 
 #[async_trait]
 pub trait StrategyClient: Send + Sync {
+    /// Query the strategy for its data requirements (intervals + lookback).
+    async fn get_requirements(&self, name: &str, config: &str) -> Result<Vec<IntervalRequirement>>;
+
     async fn initialize(
         &self,
         name: &str,
@@ -84,6 +100,24 @@ pub struct BacktestResult {
     pub custom_metrics: serde_json::Value,
 }
 
+// ── Helper: interval -> bars per day ────────────────────────────────────────
+
+/// Maps a Kite-style interval string to the number of bars in a single
+/// Indian trading session (9:15 to 15:30 = 375 minutes).
+fn parse_interval_bars_per_day(interval: &str) -> usize {
+    match interval {
+        "minute" => 375,
+        "3minute" => 125,
+        "5minute" => 75,
+        "10minute" => 38,
+        "15minute" => 25,
+        "30minute" => 13,
+        "60minute" => 7,
+        "day" => 1,
+        _ => 1,
+    }
+}
+
 // ── BacktestEngine ──────────────────────────────────────────────────────────
 
 pub struct BacktestEngine;
@@ -91,9 +125,10 @@ pub struct BacktestEngine;
 impl BacktestEngine {
     pub async fn run(
         config: BacktestConfig,
-        bars: Vec<Bar>,
+        bars_by_interval: HashMap<String, Vec<Bar>>,
         strategy: &dyn StrategyClient,
         instruments: Vec<InstrumentData>,
+        requirements: &[IntervalRequirement],
     ) -> Result<BacktestResult> {
         // 1. Initialize strategy
         strategy
@@ -110,23 +145,57 @@ impl BacktestEngine {
         let mut portfolio = PortfolioManager::new(config.initial_capital);
         let mut matcher = OrderMatcher::new(config.slippage_pct);
 
-        // 3. Lookback buffers per symbol
-        let mut lookback: HashMap<String, VecDeque<Bar>> = HashMap::new();
+        // 3. Determine the finest interval (most bars per day = finest granularity)
+        let finest_interval_str = requirements
+            .iter()
+            .max_by_key(|r| parse_interval_bars_per_day(&r.interval))
+            .map(|r| r.interval.clone())
+            .unwrap_or_else(|| "day".to_string());
+
+        // 4. Get the finest interval bars (these drive the tick timeline)
+        let finest_bars = bars_by_interval
+            .get(&finest_interval_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no bars for finest interval {}", finest_interval_str)
+            })?;
+
+        // 5. Index all intervals' bars by timestamp for O(1) lookup
+        let mut bar_index: HashMap<String, HashMap<i64, Vec<Bar>>> = HashMap::new();
+        for (interval, bars) in &bars_by_interval {
+            let mut ts_map: HashMap<i64, Vec<Bar>> = HashMap::new();
+            for bar in bars {
+                ts_map
+                    .entry(bar.timestamp_ms)
+                    .or_default()
+                    .push(bar.clone());
+            }
+            bar_index.insert(interval.clone(), ts_map);
+        }
+
+        // 6. Lookback buffers per (symbol, interval)
+        let mut lookback: HashMap<(String, String), VecDeque<Bar>> = HashMap::new();
+        let lookback_sizes: HashMap<String, usize> = requirements
+            .iter()
+            .map(|r| (r.interval.clone(), r.lookback))
+            .collect();
+
+        // Collect all interval names for SessionContext
+        let interval_names: Vec<String> = requirements.iter().map(|r| r.interval.clone()).collect();
 
         // Track fills and rejections for next on_bar call
         let mut last_fills: Vec<Fill> = Vec::new();
         let mut last_rejections: Vec<OrderRejection> = Vec::new();
 
-        // 4. Group bars by timestamp
-        let grouped = group_bars_by_timestamp(bars);
+        // 7. Group finest bars by timestamp
+        let grouped = group_bars_by_timestamp(finest_bars.clone());
         let total_bars = grouped.len() as i32;
 
-        // 5. Process each timestamp group
-        for (bar_idx, (timestamp, bar_group)) in grouped.iter().enumerate() {
-            // a. Process pending orders for each bar in this group
+        // 8. Process each timestamp group
+        for (bar_idx, (timestamp, finest_bar_group)) in grouped.iter().enumerate() {
+            // a. Process pending orders using finest interval bars
             let mut current_fills = Vec::new();
             let mut current_rejections = Vec::new();
-            for bar in bar_group {
+            for bar in finest_bar_group {
                 let (fills, rejects) = matcher.process_bar(bar);
                 for fill in &fills {
                     let trade_value = fill.quantity as f64 * fill.fill_price;
@@ -152,37 +221,49 @@ impl BacktestEngine {
                 current_rejections.extend(rejects);
             }
 
-            // b. Update portfolio with current prices
+            // b. Update portfolio with current prices (from finest interval bars)
             let mut prices = HashMap::new();
-            for bar in bar_group {
+            for bar in finest_bar_group {
                 prices.insert(bar.symbol.clone(), bar.close);
             }
             portfolio.update_prices(&prices, *timestamp);
 
-            // c. Update lookback buffers
-            for bar in bar_group {
-                let buf = lookback
-                    .entry(bar.symbol.clone())
-                    .or_insert_with(VecDeque::new);
-                buf.push_back(bar.clone());
-                if buf.len() > config.lookback_window {
-                    buf.pop_front();
+            // c. Build timeframes map and update lookback buffers
+            let mut timeframes: HashMap<String, HashMap<String, Bar>> = HashMap::new();
+            for req in requirements {
+                if let Some(ts_map) = bar_index.get(&req.interval) {
+                    if let Some(bars_at_ts) = ts_map.get(timestamp) {
+                        let symbol_map: HashMap<String, Bar> = bars_at_ts
+                            .iter()
+                            .map(|b| (b.symbol.clone(), b.clone()))
+                            .collect();
+                        timeframes.insert(req.interval.clone(), symbol_map);
+
+                        // Update lookback for this interval
+                        for bar in bars_at_ts {
+                            let key = (bar.symbol.clone(), req.interval.clone());
+                            let max_len =
+                                lookback_sizes.get(&req.interval).copied().unwrap_or(200);
+                            let buf = lookback.entry(key).or_insert_with(VecDeque::new);
+                            buf.push_back(bar.clone());
+                            if buf.len() > max_len {
+                                buf.pop_front();
+                            }
+                        }
+                    }
                 }
             }
 
-            // d. Build snapshot
-            let bars_map: HashMap<String, Bar> = bar_group
+            // d. Build history from lookback buffers
+            let history: HashMap<(String, String), Vec<Bar>> = lookback
                 .iter()
-                .map(|b| (b.symbol.clone(), b.clone()))
-                .collect();
-            let history: HashMap<String, Vec<Bar>> = lookback
-                .iter()
-                .map(|(sym, buf)| (sym.clone(), buf.iter().cloned().collect()))
+                .map(|(k, buf)| (k.clone(), buf.iter().cloned().collect()))
                 .collect();
 
+            // e. Build snapshot
             let snapshot = MarketSnapshot {
                 timestamp_ms: *timestamp,
-                bars: bars_map,
+                timeframes,
                 history,
                 portfolio: portfolio.portfolio_state(),
                 instruments: instruments.clone(),
@@ -195,19 +276,20 @@ impl BacktestEngine {
                     total_bars,
                     start_date: config.start_date.clone(),
                     end_date: config.end_date.clone(),
-                    interval: config.interval.as_kite_str().to_string(),
+                    intervals: interval_names.clone(),
                     lookback_window: config.lookback_window as i32,
                 },
             };
 
-            // e. Get strategy signals
+            // f. Get strategy signals
             let signals = strategy.on_bar(&snapshot).await?;
 
-            // f. Submit new orders (with margin check)
+            // g. Submit new orders (with margin check)
             for signal in signals {
                 if signal.action != Action::Hold {
                     if let Some(max_margin) = config.margin_available {
-                        let trade_value = signal.quantity as f64 * bar_group[0].close;
+                        let trade_value =
+                            signal.quantity as f64 * finest_bar_group[0].close;
                         let current_exposure = portfolio.equity() - portfolio.cash();
                         if current_exposure + trade_value > max_margin {
                             current_rejections.push(OrderRejection {
@@ -232,7 +314,7 @@ impl BacktestEngine {
             last_rejections = current_rejections;
         }
 
-        // 6. Complete
+        // 9. Complete
         let custom_metrics = strategy.on_complete().await?;
 
         Ok(BacktestResult {
@@ -284,6 +366,13 @@ mod tests {
 
     #[async_trait]
     impl StrategyClient for MockStrategyClient {
+        async fn get_requirements(&self, _name: &str, _config: &str) -> Result<Vec<IntervalRequirement>> {
+            Ok(vec![IntervalRequirement {
+                interval: "minute".into(),
+                lookback: 200,
+            }])
+        }
+
         async fn initialize(
             &self,
             _name: &str,
@@ -296,12 +385,12 @@ mod tests {
 
         async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
-            // Get the first symbol from the current bars
+            // Get the first symbol from the first available timeframe
             let symbol = snapshot
-                .bars
-                .keys()
+                .timeframes
+                .values()
                 .next()
-                .cloned()
+                .and_then(|m| m.keys().next().cloned())
                 .unwrap_or_default();
             if count == 5 {
                 Ok(vec![Signal::market_buy(&symbol, 10)])
@@ -346,9 +435,17 @@ mod tests {
             lookback_window: 200,
         };
 
-        let result = BacktestEngine::run(config, bars, &client, vec![])
-            .await
-            .unwrap();
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "minute".into(),
+            lookback: 200,
+        }];
+
+        let result =
+            BacktestEngine::run(config, bars_by_interval, &client, vec![], &requirements)
+                .await
+                .unwrap();
         assert_eq!(result.trades.len(), 1); // one round-trip trade (buy bar 5, sell bar 10)
         assert!(result.final_equity > 0.0);
         assert!(!result.equity_curve.is_empty());
@@ -362,6 +459,12 @@ mod tests {
 
         #[async_trait]
         impl StrategyClient for HoldStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "day".into(),
+                    lookback: 200,
+                }])
+            }
             async fn initialize(
                 &self,
                 _: &str,
@@ -392,6 +495,13 @@ mod tests {
             })
             .collect();
 
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("day".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "day".into(),
+            lookback: 200,
+        }];
+
         let result = BacktestEngine::run(
             BacktestConfig {
                 strategy_name: "hold".into(),
@@ -405,9 +515,10 @@ mod tests {
                 margin_available: None,
                 lookback_window: 200,
             },
-            bars,
+            bars_by_interval,
             &HoldStrategy,
             vec![],
+            &requirements,
         )
         .await
         .unwrap();
@@ -424,6 +535,12 @@ mod tests {
 
         #[async_trait]
         impl StrategyClient for BigBuyStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "minute".into(),
+                    lookback: 200,
+                }])
+            }
             async fn initialize(
                 &self,
                 _: &str,
@@ -435,10 +552,10 @@ mod tests {
             }
             async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
                 let symbol = snapshot
-                    .bars
-                    .keys()
+                    .timeframes
+                    .values()
                     .next()
-                    .cloned()
+                    .and_then(|m| m.keys().next().cloned())
                     .unwrap_or_default();
                 Ok(vec![Signal::market_buy(&symbol, 1000)])
             }
@@ -460,6 +577,13 @@ mod tests {
             })
             .collect();
 
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "minute".into(),
+            lookback: 200,
+        }];
+
         let result = BacktestEngine::run(
             BacktestConfig {
                 strategy_name: "big_buy".into(),
@@ -473,9 +597,10 @@ mod tests {
                 margin_available: Some(50_000.0),
                 lookback_window: 200,
             },
-            bars,
+            bars_by_interval,
             &BigBuyStrategy,
             vec![],
+            &requirements,
         )
         .await
         .unwrap();

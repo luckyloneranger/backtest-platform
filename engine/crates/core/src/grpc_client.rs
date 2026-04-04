@@ -6,11 +6,12 @@ use tonic::transport::Channel;
 use backtest_proto::backtest::{
     strategy_service_client::StrategyServiceClient, BarData, BarEvent, CompleteRequest,
     FillInfo, InitRequest, InstrumentInfo, OrderRejection as ProtoOrderRejection,
-    PortfolioState, PositionInfo, SessionContext as ProtoSessionContext,
-    SymbolHistory, TradeInfo,
+    PortfolioState, PositionInfo, RequirementsRequest,
+    SessionContext as ProtoSessionContext, TimeframeData, TimeframeHistory,
+    TradeInfo,
 };
 
-use crate::engine::{InstrumentData, MarketSnapshot, StrategyClient};
+use crate::engine::{InstrumentData, IntervalRequirement, MarketSnapshot, StrategyClient};
 use crate::matching::Side;
 use crate::types::{Action, OrderType, Signal};
 
@@ -41,8 +42,45 @@ impl GrpcStrategyClient {
     }
 }
 
+/// Helper to convert a domain `Bar` into a proto `BarData`.
+fn bar_to_proto(b: &crate::types::Bar) -> BarData {
+    BarData {
+        symbol: b.symbol.clone(),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume,
+        oi: b.oi,
+    }
+}
+
 #[async_trait]
 impl StrategyClient for GrpcStrategyClient {
+    async fn get_requirements(
+        &self,
+        name: &str,
+        config: &str,
+    ) -> Result<Vec<IntervalRequirement>> {
+        let mut client = self.client.lock().await.clone();
+        let resp = client
+            .get_requirements(RequirementsRequest {
+                strategy_name: name.into(),
+                config_json: config.into(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp
+            .intervals
+            .into_iter()
+            .map(|r| IntervalRequirement {
+                interval: r.interval,
+                lookback: r.lookback as usize,
+            })
+            .collect())
+    }
+
     async fn initialize(
         &self,
         name: &str,
@@ -104,39 +142,24 @@ impl StrategyClient for GrpcStrategyClient {
                 .collect(),
         };
 
-        // Convert domain bars -> proto BarData
-        let proto_bars: Vec<BarData> = snapshot
-            .bars
-            .values()
-            .map(|b| BarData {
-                symbol: b.symbol.clone(),
-                open: b.open,
-                high: b.high,
-                low: b.low,
-                close: b.close,
-                volume: b.volume,
-                oi: b.oi,
+        // Convert timeframes -> proto TimeframeData
+        let proto_timeframes: Vec<TimeframeData> = snapshot
+            .timeframes
+            .iter()
+            .map(|(interval, symbol_bars)| TimeframeData {
+                interval: interval.clone(),
+                bars: symbol_bars.values().map(|b| bar_to_proto(b)).collect(),
             })
             .collect();
 
-        // Convert history -> proto SymbolHistory
-        let proto_history: Vec<SymbolHistory> = snapshot
+        // Convert history -> proto TimeframeHistory
+        let proto_history: Vec<TimeframeHistory> = snapshot
             .history
             .iter()
-            .map(|(sym, bars)| SymbolHistory {
-                symbol: sym.clone(),
-                bars: bars
-                    .iter()
-                    .map(|b| BarData {
-                        symbol: b.symbol.clone(),
-                        open: b.open,
-                        high: b.high,
-                        low: b.low,
-                        close: b.close,
-                        volume: b.volume,
-                        oi: b.oi,
-                    })
-                    .collect(),
+            .map(|((symbol, interval), bars)| TimeframeHistory {
+                symbol: symbol.clone(),
+                interval: interval.clone(),
+                bars: bars.iter().map(|b| bar_to_proto(b)).collect(),
             })
             .collect();
 
@@ -206,21 +229,21 @@ impl StrategyClient for GrpcStrategyClient {
             })
             .collect();
 
-        // Convert context -> proto SessionContext
+        // Convert context -> proto SessionContext (intervals instead of interval)
         let proto_context = ProtoSessionContext {
             initial_capital: snapshot.context.initial_capital,
             bar_number: snapshot.context.bar_number,
             total_bars: snapshot.context.total_bars,
             start_date: snapshot.context.start_date.clone(),
             end_date: snapshot.context.end_date.clone(),
-            interval: snapshot.context.interval.clone(),
+            intervals: snapshot.context.intervals.clone(),
             lookback_window: snapshot.context.lookback_window,
         };
 
-        // Build enriched BarEvent
+        // Build enriched BarEvent with multi-timeframe data
         let bar_event = BarEvent {
             timestamp_ms: snapshot.timestamp_ms,
-            bars: proto_bars,
+            timeframes: proto_timeframes,
             history: proto_history,
             portfolio: Some(proto_portfolio),
             instruments: proto_instruments,
