@@ -12,3 +12,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+arrow = "54"
+parquet = { version = "54", features = ["arrow"] }
+
+[dev-dependencies]
+tempfile = "3"

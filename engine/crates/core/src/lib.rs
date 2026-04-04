@@ -5,4 +5,5 @@ pub mod grpc_client;
 pub mod matching;
 pub mod metrics;
 pub mod portfolio;
+pub mod reporter;
 pub mod types;
