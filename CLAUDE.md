@@ -49,27 +49,37 @@ Rust engine + Python strategy server communicating via gRPC (port 50051).
 
 | Crate | Purpose | Key types |
 |-------|---------|-----------|
-| `backtest-proto` | gRPC proto definitions + codegen | `BarEvent`, `Signal`, `StrategyService` |
-| `backtest-core` | Engine, matching, portfolio, costs, metrics | `BacktestEngine`, `OrderMatcher`, `PortfolioManager`, `ZerodhaCostModel`, `MetricsReport` |
-| `backtest-data` | Kite API client, SQLite instruments, Parquet candles | `KiteClient`, `InstrumentStore`, `CandleStore` |
+| `backtest-proto` | gRPC proto definitions + codegen | `BarEvent`, `Signal`, `StrategyService`, `DataRequirements` |
+| `backtest-core` | Engine, matching, portfolio, costs, metrics | `BacktestEngine`, `OrderMatcher`, `PortfolioManager`, `ZerodhaCostModel`, `MetricsReport`, `MarketSnapshot` |
+| `backtest-data` | Kite API client, SQLite instruments, Parquet candles | `KiteClient`, `InstrumentStore`, `CandleStore`, `QuoteData` |
 | `backtest-cli` | CLI binary (`backtest`) | Subcommands: `data`, `run`, `results` |
 
 Dependency flow: `cli → data → core → proto`
 
 ### Python (`strategies/`)
 
-- `strategies/base.py` — Abstract `Strategy` class with `initialize()`, `on_bar()`, `on_complete()`
+- `strategies/base.py` — Abstract `Strategy` class with `required_data()`, `initialize()`, `on_bar()`, `on_complete()`. Also defines `MarketSnapshot`, `BarData`, `InstrumentInfo`, `FillInfo`, `OrderRejection`, `TradeInfo`, `SessionContext`.
 - `server/registry.py` — `@register("name")` decorator for strategy discovery
-- `server/server.py` — gRPC server that dispatches to registered strategies
+- `server/server.py` — gRPC server: handles `GetRequirements`, `Initialize`, `OnBar`, `OnComplete`
 - New strategies go in `strategies/examples/`, decorated with `@register`
+
+### Strategy Data Flow
+
+**Strategy declares requirements → Engine provides data → Strategy decides → Engine executes.**
+
+1. Engine calls `GetRequirements` RPC → strategy returns intervals + lookback per interval
+2. Engine loads candle data for each (symbol, interval) from CandleStore
+3. Engine ticks at the finest declared interval
+4. Each tick: `MarketSnapshot.timeframes` is `{interval → {symbol → BarData}}`. Coarser bars only appear when their candle closes.
+5. Strategy returns signals → engine processes orders
 
 ### Event Loop (`BacktestEngine::run`)
 
-Per bar: process pending orders → update portfolio prices → call strategy via gRPC → submit new orders from signals. Market orders fill at next bar's open. Costs applied per fill via `ZerodhaCostModel`.
+Per timestamp: process pending orders (with circuit limit + margin checks) → update portfolio prices → build `MarketSnapshot` with all timeframes, lookback, fills, rejections, trades, instruments → call strategy via gRPC → submit new orders from signals. Market orders fill at next bar's open. Costs applied per fill via `ZerodhaCostModel`.
 
 ### Data Storage
 
-- **SQLite** (`./data/instruments.db`): Instrument metadata (token, symbol, exchange, lot_size, expiry, etc.)
+- **SQLite** (`./data/instruments.db`): Instrument metadata (token, symbol, name, exchange, lot_size, tick_size, expiry, strike, option_type, segment)
 - **Parquet** (`./data/{EXCHANGE}/{SYMBOL}/{INTERVAL}/data.parquet`): OHLCV+OI candles
 - **Results** (`./results/{id}/`): `config.json`, `metrics.json`, `trades.parquet`, `equity_curve.parquet`
 
@@ -85,3 +95,6 @@ Per bar: process pending orders → update portfolio prices → call strategy vi
 - The `StrategyClient` trait in `engine.rs` is the abstraction boundary — `GrpcStrategyClient` is the production impl, tests use mock impls
 - `CircuitLimits` in `OrderMatcher` are optional — set via `set_circuit_limits()`, unset means no checking
 - `BacktestConfig.margin_available` is optional — when `Some`, orders exceeding the margin are skipped
+- Order rejections (circuit limit, margin) are tracked and sent to strategies via `MarketSnapshot.rejections`
+- Strategies declare data needs via `required_data()` — engine loads and serves accordingly
+- Multi-timeframe: engine ticks at finest interval, coarser bars appear only when their candle closes

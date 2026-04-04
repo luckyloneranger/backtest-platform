@@ -7,6 +7,8 @@ An Indian market backtesting platform for evaluating trading strategies against 
 ## Features
 
 - **Event-driven backtesting** — bar-by-bar simulation with realistic order matching (market, limit, stop-loss)
+- **Multi-timeframe support** — strategies declare which intervals they need; engine loads and serves all of them
+- **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback, order rejections, trade history, and session context via `MarketSnapshot`
 - **Zerodha Kite Connect integration** — fetch instruments, historical candles (minute to daily), OI data, continuous futures
 - **Indian market cost model** — Zerodha brokerage, STT, GST, SEBI fees, stamp duty
 - **Circuit limit checking** — optional order rejection at upper/lower circuit bounds
@@ -14,6 +16,7 @@ An Indian market backtesting platform for evaluating trading strategies against 
 - **Performance metrics** — Sharpe, Sortino, Calmar, max drawdown, CAGR, win rate, profit factor
 - **All Kite intervals** — minute, 3min, 5min, 10min, 15min, 30min, 60min, daily
 - **Auto candle chunking** — transparently handles Kite's 2000-candle API limit
+- **Multi-symbol backtests** — all symbols grouped per timestamp in one `on_bar` call
 
 ## Architecture
 
@@ -97,10 +100,8 @@ python -m server.server
 ### Set up Kite Connect credentials
 
 ```bash
-# .env (already gitignored)
-KITE_API_KEY=your_api_key
-KITE_API_SECRET=your_api_secret
-KITE_ACCESS_TOKEN=your_daily_access_token
+cp .env.example .env
+# Edit .env with your API key and secret
 ```
 
 The access token must be refreshed daily via Kite's login flow:
@@ -129,31 +130,42 @@ backtest data list
 
 ## Writing a Strategy
 
+Strategies declare what data they need, receive a rich `MarketSnapshot`, and return trading signals.
+
 Create a Python class in `strategies/strategies/examples/`:
 
 ```python
-from collections import deque
 from server.registry import register
-from strategies.base import Strategy, Bar, Portfolio, Signal
+from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal
 
 @register("my_strategy")
 class MyStrategy(Strategy):
-    def initialize(self, config: dict) -> None:
-        self.period = config.get("period", 20)
-        self.prices = deque(maxlen=self.period)
+    def required_data(self) -> list[dict]:
+        """Declare which timeframes and lookback this strategy needs."""
+        return [
+            {"interval": "5minute", "lookback": 50},
+            {"interval": "day", "lookback": 200},
+        ]
 
-    def on_bar(self, bar: Bar, portfolio: Portfolio) -> list[Signal]:
-        self.prices.append(bar.close)
-        if len(self.prices) < self.period:
-            return []
+    def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
+        self.threshold = config.get("threshold", 0.02)
 
-        # Your logic here
-        avg = sum(self.prices) / len(self.prices)
-        if bar.close > avg * 1.02:
-            return [Signal(action="BUY", symbol=bar.symbol, quantity=1)]
-        elif bar.close < avg * 0.98:
-            return [Signal(action="SELL", symbol=bar.symbol, quantity=1)]
-        return []
+    def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
+        signals = []
+
+        # 5-minute bars available every tick
+        if "5minute" in snapshot.timeframes:
+            for symbol, bar in snapshot.timeframes["5minute"].items():
+                # Check daily trend for confirmation
+                daily_bars = snapshot.history.get((symbol, "day"), [])
+                if daily_bars and bar.close > daily_bars[-1].close * (1 + self.threshold):
+                    signals.append(Signal(action="BUY", symbol=symbol, quantity=1))
+
+        # Check for rejected orders from last bar
+        for rejection in snapshot.rejections:
+            print(f"Order rejected: {rejection.symbol} {rejection.reason}")
+
+        return signals
 
     def on_complete(self) -> dict:
         return {"custom_metric": 42}
@@ -167,22 +179,35 @@ import strategies.examples.my_strategy  # noqa: F401
 Run:
 ```bash
 backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 2025-03-31 \
-  --capital 1000000 --interval day --params '{"period": 20}'
+  --capital 1000000 --params '{"threshold": 0.02}'
 ```
 
 ## Strategy Interface
 
-| Method | Called | Returns |
-|--------|--------|---------|
-| `initialize(config)` | Once at backtest start | None |
-| `on_bar(bar, portfolio)` | Every bar | `list[Signal]` |
-| `on_complete()` | After last bar | `dict` (custom metrics) |
+| Method | Called | Receives | Returns |
+|--------|--------|----------|---------|
+| `required_data()` | Before init | Nothing | `list[dict]` — intervals + lookback |
+| `initialize(config, instruments)` | Once at start | Config dict + instrument metadata | None |
+| `on_bar(snapshot)` | Every bar (finest interval) | `MarketSnapshot` | `list[Signal]` |
+| `on_complete()` | After last bar | Nothing | `dict` (custom metrics) |
 
-**Signal fields**: `action` (BUY/SELL/HOLD), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`
+### MarketSnapshot fields
 
-**Bar fields**: `timestamp_ms`, `symbol`, `open`, `high`, `low`, `close`, `volume`, `oi`
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp_ms` | int | Current timestamp |
+| `timeframes` | `dict[str, dict[str, BarData]]` | `interval → symbol → bar` (only intervals with new candles) |
+| `history` | `dict[tuple[str, str], list[BarData]]` | `(symbol, interval) → last N bars` |
+| `portfolio` | `Portfolio` | Cash, equity, positions |
+| `instruments` | `dict[str, InstrumentInfo]` | lot_size, tick_size, expiry, strike, circuit limits |
+| `fills` | `list[FillInfo]` | Fills from previous bar |
+| `rejections` | `list[OrderRejection]` | Rejected orders with reasons |
+| `closed_trades` | `list[TradeInfo]` | All completed trades |
+| `context` | `SessionContext` | initial_capital, bar_number, total_bars, dates, intervals |
 
-**Portfolio fields**: `cash`, `equity`, `positions` (list of `Position` with symbol, quantity, avg_price, unrealized_pnl)
+### Signal fields
+
+`action` (BUY/SELL/HOLD), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`
 
 ## Running Tests
 
