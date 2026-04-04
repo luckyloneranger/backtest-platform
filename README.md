@@ -41,6 +41,7 @@ CLI (Rust) ─┬─ Data Manager ──► SQLite (instruments) + Parquet (cand
 - **Python** (3.11+)
 - **protoc** (Protocol Buffers compiler) — `brew install protobuf`
 - **Zerodha Kite Connect** API subscription (₹2000/mo) for live data — or use synthetic data for testing
+- **Azure OpenAI** (optional) — for LLM-based strategies
 
 ## Quick Start
 
@@ -133,7 +134,7 @@ backtest data list
 
 Strategies declare what data they need, receive a rich `MarketSnapshot`, and return trading signals.
 
-Create a Python class in `strategies/strategies/examples/`:
+Create a Python class in `strategies/strategies/deterministic/` (for rule-based strategies) or `strategies/strategies/llm/` (for LLM-powered strategies):
 
 ```python
 from server.registry import register
@@ -180,7 +181,7 @@ class MyStrategy(Strategy):
 
 Import it in `strategies/server/server.py`:
 ```python
-import strategies.examples.my_strategy  # noqa: F401
+import strategies.deterministic.my_strategy  # noqa: F401
 ```
 
 Run:
@@ -191,11 +192,12 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 ### Included strategies
 
-| Strategy | Timeframes | Description |
-|----------|-----------|-------------|
-| `sma_crossover` | day | Simple Moving Average crossover (golden/death cross) |
-| `rsi_daily_trend` | 15min + day | RSI for entry timing, daily EMA for trend filter, dynamic position sizing |
-| `donchian_breakout` | 15min + day | Donchian channel breakout with volume confirmation and ATR trailing stop |
+| Strategy | Type | Timeframes | Description |
+|----------|------|-----------|-------------|
+| `sma_crossover` | Deterministic | day | Simple Moving Average crossover (golden/death cross) |
+| `rsi_daily_trend` | Deterministic | 15min + day | RSI for entry timing, daily EMA for trend filter, dynamic position sizing |
+| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with volume confirmation and ATR trailing stop |
+| `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — sends market data, receives BUY/SELL |
 
 ## Strategy Interface
 
@@ -250,7 +252,9 @@ backtest-platform/
 │       └── cli/                # CLI binary
 ├── strategies/                 # Python strategy server
 │   ├── server/                 # gRPC server + registry
-│   ├── strategies/             # Strategy base class + examples
+│   ├── strategies/             # Strategy base classes + implementations
+│   │   ├── deterministic/      # Rule-based strategies
+│   │   └── llm/                # LLM-powered strategies
 │   └── tests/
 ├── data/                       # Local data cache (gitignored)
 ├── results/                    # Backtest results (gitignored)

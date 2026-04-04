@@ -59,9 +59,11 @@ Dependency flow: `cli → data → core → proto`
 ### Python (`strategies/`)
 
 - `strategies/base.py` — Abstract `Strategy` class with `required_data()`, `initialize()`, `on_bar()`, `on_complete()`. Also defines `MarketSnapshot`, `BarData`, `InstrumentInfo`, `FillInfo`, `OrderRejection`, `TradeInfo`, `SessionContext`.
+- `strategies/llm_base.py` — `LLMStrategy` subclass of `Strategy`. Handles Azure OpenAI client init, snapshot formatting, and signal parsing. LLM strategies subclass this and implement `build_prompt()`.
+- `strategies/llm_client.py` — `AzureOpenAIClient` wrapper. Reads env vars, calls Azure OpenAI REST API, retry with backoff.
 - `server/registry.py` — `@register("name")` decorator for strategy discovery
 - `server/server.py` — gRPC server: handles `GetRequirements`, `Initialize`, `OnBar`, `OnComplete`
-- New strategies go in `strategies/examples/`, decorated with `@register`
+- Deterministic strategies go in `strategies/strategies/deterministic/`, LLM strategies in `strategies/strategies/llm/`, all decorated with `@register`
 
 ### Strategy Data Flow
 
@@ -90,6 +92,8 @@ Per timestamp: process pending orders (with circuit limit + margin checks) → u
 - Proto changes require regenerating both Rust (`cargo build -p backtest-proto`) and Python (`cd strategies && ./generate_proto.sh`) stubs
 - `generate_proto.sh` applies a `sed` fix for Python relative imports — don't remove it
 - Kite access tokens expire daily; env vars `KITE_API_KEY` and `KITE_ACCESS_TOKEN` must be set for data fetching
+- Azure OpenAI env vars for LLM strategies: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT`
+- LLM strategies subclass `LLMStrategy` from `llm_base.py`, not `Strategy` directly
 - Supported intervals: `minute`, `3minute`, `5minute`, `10minute`, `15minute`, `30minute`, `60minute`, `day`
 - `fetch_candles_chunked` auto-splits requests to stay under Kite's 2000-candle limit
 - The `StrategyClient` trait in `engine.rs` is the abstraction boundary — `GrpcStrategyClient` is the production impl, tests use mock impls
