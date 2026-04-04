@@ -22,6 +22,7 @@ from strategies.base import (
 import strategies.deterministic.sma_crossover  # noqa: F401
 import strategies.deterministic.rsi_daily_trend  # noqa: F401
 import strategies.deterministic.donchian_breakout  # noqa: F401
+import strategies.llm.llm_signal_generator  # noqa: F401
 
 
 class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
