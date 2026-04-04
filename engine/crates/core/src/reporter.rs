@@ -178,6 +178,7 @@ impl Reporter {
             Field::new("exit_timestamp_ms", DataType::Int64, false),
             Field::new("pnl", DataType::Float64, false),
             Field::new("costs", DataType::Float64, false),
+            Field::new("direction", DataType::Utf8, false),
         ]));
 
         let symbols: Vec<&str> = trades.iter().map(|t| t.symbol.as_str()).collect();
@@ -189,6 +190,13 @@ impl Reporter {
         let exit_timestamps: Vec<i64> = trades.iter().map(|t| t.exit_timestamp_ms).collect();
         let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
         let costs: Vec<f64> = trades.iter().map(|t| t.costs).collect();
+        let directions: Vec<&str> = trades
+            .iter()
+            .map(|t| match t.direction {
+                crate::types::Direction::Long => "LONG",
+                crate::types::Direction::Short => "SHORT",
+            })
+            .collect();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -202,6 +210,7 @@ impl Reporter {
                 Arc::new(Int64Array::from(exit_timestamps)),
                 Arc::new(Float64Array::from(pnls)),
                 Arc::new(Float64Array::from(costs)),
+                Arc::new(StringArray::from(directions)),
             ],
         )
         .context("failed to create record batch for trades")?;
@@ -272,6 +281,7 @@ mod tests {
                 exit_timestamp_ms: 2_000,
                 pnl: 1000.0,
                 costs: 50.0,
+                direction: crate::types::Direction::Long,
             },
             ClosedTrade {
                 symbol: "INFY".into(),
@@ -283,6 +293,7 @@ mod tests {
                 exit_timestamp_ms: 4_000,
                 pnl: -1000.0,
                 costs: 60.0,
+                direction: crate::types::Direction::Long,
             },
         ];
 

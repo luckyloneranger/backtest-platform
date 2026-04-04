@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::matching::{Fill, Side};
-use crate::types::{Portfolio, Position};
+use crate::types::{Direction, Portfolio, Position, ProductType};
 
 // ── ClosedTrade ─────────────────────────────────────────────────────────────
 
@@ -18,6 +18,7 @@ pub struct ClosedTrade {
     pub exit_timestamp_ms: i64,
     pub pnl: f64,   // net P&L after costs: (exit - entry) * qty - total_costs
     pub costs: f64,  // total transaction costs for this round-trip
+    pub direction: Direction,
 }
 
 impl Default for ClosedTrade {
@@ -32,6 +33,7 @@ impl Default for ClosedTrade {
             exit_timestamp_ms: 0,
             pnl: 0.0,
             costs: 0.0,
+            direction: Direction::Long,
         }
     }
 }
@@ -51,11 +53,13 @@ pub struct EquityPoint {
 #[derive(Debug, Clone)]
 pub struct InternalPosition {
     pub symbol: String,
-    pub quantity: i32,        // positive = long, negative = short
+    pub quantity: i32,        // always positive; direction indicated by is_short
     pub avg_price: f64,
     pub current_price: f64,
     pub entry_timestamp_ms: i64,
     pub total_costs: f64,     // accumulated costs
+    pub is_short: bool,
+    pub product_type: ProductType,
 }
 
 // ── PortfolioManager ────────────────────────────────────────────────────────
@@ -90,19 +94,72 @@ impl PortfolioManager {
     }
 
     fn apply_buy(&mut self, fill: &Fill, costs: f64) {
-        self.cash -= fill.quantity as f64 * fill.fill_price + costs;
-
         if let Some(pos) = self.positions.get_mut(&fill.symbol) {
-            // Existing long position: average up
-            let old_qty = pos.quantity;
-            let new_qty = old_qty + fill.quantity;
-            pos.avg_price = (old_qty as f64 * pos.avg_price
-                + fill.quantity as f64 * fill.fill_price)
-                / new_qty as f64;
-            pos.quantity = new_qty;
-            pos.total_costs += costs;
+            if pos.is_short {
+                // Closing (fully or partially) a short position
+                let close_qty = fill.quantity.min(pos.quantity);
+                // Debit cash: we buy back shares at fill_price + costs
+                self.cash -= close_qty as f64 * fill.fill_price + costs;
+
+                if close_qty >= pos.quantity {
+                    // Full close of short
+                    let closed_qty = pos.quantity;
+                    let gross_pnl = (pos.avg_price - fill.fill_price) * closed_qty as f64;
+                    let total_costs = pos.total_costs + costs;
+                    let pnl = gross_pnl - total_costs;
+
+                    self.closed_trades.push(ClosedTrade {
+                        symbol: fill.symbol.clone(),
+                        side: "SELL".to_string(),
+                        quantity: closed_qty,
+                        entry_price: pos.avg_price,
+                        exit_price: fill.fill_price,
+                        entry_timestamp_ms: pos.entry_timestamp_ms,
+                        exit_timestamp_ms: fill.timestamp_ms,
+                        pnl,
+                        costs: total_costs,
+                        direction: Direction::Short,
+                    });
+                    self.positions.remove(&fill.symbol);
+                } else {
+                    // Partial close of short
+                    let closed_qty = close_qty;
+                    let gross_pnl = (pos.avg_price - fill.fill_price) * closed_qty as f64;
+                    let entry_cost_portion =
+                        pos.total_costs * (closed_qty as f64 / pos.quantity as f64);
+                    let total_costs = entry_cost_portion + costs;
+                    let pnl = gross_pnl - total_costs;
+
+                    self.closed_trades.push(ClosedTrade {
+                        symbol: fill.symbol.clone(),
+                        side: "SELL".to_string(),
+                        quantity: closed_qty,
+                        entry_price: pos.avg_price,
+                        exit_price: fill.fill_price,
+                        entry_timestamp_ms: pos.entry_timestamp_ms,
+                        exit_timestamp_ms: fill.timestamp_ms,
+                        pnl,
+                        costs: total_costs,
+                        direction: Direction::Short,
+                    });
+
+                    pos.total_costs -= entry_cost_portion;
+                    pos.quantity -= closed_qty;
+                }
+            } else {
+                // Existing long position: average up
+                self.cash -= fill.quantity as f64 * fill.fill_price + costs;
+                let old_qty = pos.quantity;
+                let new_qty = old_qty + fill.quantity;
+                pos.avg_price = (old_qty as f64 * pos.avg_price
+                    + fill.quantity as f64 * fill.fill_price)
+                    / new_qty as f64;
+                pos.quantity = new_qty;
+                pos.total_costs += costs;
+            }
         } else {
-            // New position
+            // New long position
+            self.cash -= fill.quantity as f64 * fill.fill_price + costs;
             self.positions.insert(
                 fill.symbol.clone(),
                 InternalPosition {
@@ -112,87 +169,110 @@ impl PortfolioManager {
                     current_price: fill.fill_price,
                     entry_timestamp_ms: fill.timestamp_ms,
                     total_costs: costs,
+                    is_short: false,
+                    product_type: fill.product_type,
                 },
             );
         }
     }
 
     fn apply_sell(&mut self, fill: &Fill, costs: f64) {
-        // Bug 6 fix: check if position exists BEFORE modifying cash.
-        // If no position exists, log warning and return early — no phantom cash.
-        let pos = match self.positions.get_mut(&fill.symbol) {
-            Some(pos) => pos,
-            None => {
-                eprintln!(
-                    "WARNING: sell for {} ignored — no open position",
-                    fill.symbol
-                );
-                return;
+        if let Some(pos) = self.positions.get_mut(&fill.symbol) {
+            if pos.is_short {
+                // Adding to an existing short position: average down
+                self.cash += fill.quantity as f64 * fill.fill_price - costs;
+                let old_qty = pos.quantity;
+                let new_qty = old_qty + fill.quantity;
+                pos.avg_price = (old_qty as f64 * pos.avg_price
+                    + fill.quantity as f64 * fill.fill_price)
+                    / new_qty as f64;
+                pos.quantity = new_qty;
+                pos.total_costs += costs;
+            } else {
+                // Closing (fully or partially) a long position
+                // Bug 5 fix: clamp effective quantity to position size to prevent overselling.
+                let effective_qty = fill.quantity.min(pos.quantity);
+                if effective_qty < fill.quantity {
+                    eprintln!(
+                        "WARNING: sell qty {} for {} clamped to position qty {}",
+                        fill.quantity, fill.symbol, pos.quantity
+                    );
+                }
+
+                // Credit cash only for the effective (clamped) quantity
+                self.cash += effective_qty as f64 * fill.fill_price - costs;
+
+                let should_remove = if effective_qty >= pos.quantity {
+                    // Full close
+                    let closed_qty = pos.quantity;
+                    let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
+                    let total_costs = pos.total_costs + costs;
+                    // Bug 7 fix: pnl is net of costs
+                    let pnl = gross_pnl - total_costs;
+
+                    self.closed_trades.push(ClosedTrade {
+                        symbol: fill.symbol.clone(),
+                        side: "BUY".to_string(),
+                        quantity: closed_qty,
+                        entry_price: pos.avg_price,
+                        exit_price: fill.fill_price,
+                        entry_timestamp_ms: pos.entry_timestamp_ms,
+                        exit_timestamp_ms: fill.timestamp_ms,
+                        pnl,
+                        costs: total_costs,
+                        direction: Direction::Long,
+                    });
+                    true
+                } else {
+                    // Partial close
+                    let closed_qty = effective_qty;
+                    let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
+                    // Allocate costs proportionally
+                    let entry_cost_portion =
+                        pos.total_costs * (closed_qty as f64 / pos.quantity as f64);
+                    let total_costs = entry_cost_portion + costs;
+                    // Bug 7 fix: pnl is net of costs
+                    let pnl = gross_pnl - total_costs;
+
+                    self.closed_trades.push(ClosedTrade {
+                        symbol: fill.symbol.clone(),
+                        side: "BUY".to_string(),
+                        quantity: closed_qty,
+                        entry_price: pos.avg_price,
+                        exit_price: fill.fill_price,
+                        entry_timestamp_ms: pos.entry_timestamp_ms,
+                        exit_timestamp_ms: fill.timestamp_ms,
+                        pnl,
+                        costs: total_costs,
+                        direction: Direction::Long,
+                    });
+
+                    pos.total_costs -= entry_cost_portion;
+                    pos.quantity -= closed_qty;
+                    false
+                };
+
+                if should_remove {
+                    self.positions.remove(&fill.symbol);
+                }
             }
-        };
-
-        // Bug 5 fix: clamp effective quantity to position size to prevent overselling.
-        let effective_qty = fill.quantity.min(pos.quantity);
-        if effective_qty < fill.quantity {
-            eprintln!(
-                "WARNING: sell qty {} for {} clamped to position qty {}",
-                fill.quantity, fill.symbol, pos.quantity
-            );
-        }
-
-        // Credit cash only for the effective (clamped) quantity
-        self.cash += effective_qty as f64 * fill.fill_price - costs;
-
-        let should_remove = if effective_qty >= pos.quantity {
-            // Full close
-            let closed_qty = pos.quantity;
-            let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
-            let total_costs = pos.total_costs + costs;
-            // Bug 7 fix: pnl is net of costs
-            let pnl = gross_pnl - total_costs;
-
-            self.closed_trades.push(ClosedTrade {
-                symbol: fill.symbol.clone(),
-                side: "BUY".to_string(),
-                quantity: closed_qty,
-                entry_price: pos.avg_price,
-                exit_price: fill.fill_price,
-                entry_timestamp_ms: pos.entry_timestamp_ms,
-                exit_timestamp_ms: fill.timestamp_ms,
-                pnl,
-                costs: total_costs,
-            });
-            true
         } else {
-            // Partial close
-            let closed_qty = effective_qty;
-            let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
-            // Allocate costs proportionally
-            let entry_cost_portion =
-                pos.total_costs * (closed_qty as f64 / pos.quantity as f64);
-            let total_costs = entry_cost_portion + costs;
-            // Bug 7 fix: pnl is net of costs
-            let pnl = gross_pnl - total_costs;
-
-            self.closed_trades.push(ClosedTrade {
-                symbol: fill.symbol.clone(),
-                side: "BUY".to_string(),
-                quantity: closed_qty,
-                entry_price: pos.avg_price,
-                exit_price: fill.fill_price,
-                entry_timestamp_ms: pos.entry_timestamp_ms,
-                exit_timestamp_ms: fill.timestamp_ms,
-                pnl,
-                costs: total_costs,
-            });
-
-            pos.total_costs -= entry_cost_portion;
-            pos.quantity -= closed_qty;
-            false
-        };
-
-        if should_remove {
-            self.positions.remove(&fill.symbol);
+            // No position exists: create a SHORT position
+            // Credit cash with short sale proceeds
+            self.cash += fill.quantity as f64 * fill.fill_price - costs;
+            self.positions.insert(
+                fill.symbol.clone(),
+                InternalPosition {
+                    symbol: fill.symbol.clone(),
+                    quantity: fill.quantity,
+                    avg_price: fill.fill_price,
+                    current_price: fill.fill_price,
+                    entry_timestamp_ms: fill.timestamp_ms,
+                    total_costs: costs,
+                    is_short: true,
+                    product_type: fill.product_type,
+                },
+            );
         }
     }
 
@@ -230,24 +310,34 @@ impl PortfolioManager {
         &self.equity_curve
     }
 
-    /// Compute current total equity (cash + sum of position market values).
+    /// Compute current total equity (cash + long market values - short market values).
+    /// For long positions: value = qty * current_price.
+    /// For short positions: value = -(qty * current_price) because we owe shares.
+    /// (Short sale proceeds are already in cash.)
     pub fn equity(&self) -> f64 {
         self.cash
             + self
                 .positions
                 .values()
-                .map(|p| p.quantity as f64 * p.current_price)
+                .map(|p| {
+                    if p.is_short {
+                        -(p.quantity as f64 * p.current_price)
+                    } else {
+                        p.quantity as f64 * p.current_price
+                    }
+                })
                 .sum::<f64>()
     }
 
     /// Build a Portfolio snapshot for sending to strategy via gRPC.
+    /// Short positions are reported with negative quantity.
     pub fn portfolio_state(&self) -> Portfolio {
         let positions: Vec<Position> = self
             .positions
             .values()
             .map(|p| Position {
                 symbol: p.symbol.clone(),
-                quantity: p.quantity,
+                quantity: if p.is_short { -p.quantity } else { p.quantity },
                 avg_price: p.avg_price,
                 current_price: p.current_price,
             })
@@ -257,6 +347,15 @@ impl PortfolioManager {
             cash: self.cash,
             positions,
         }
+    }
+
+    /// Returns a snapshot of all open positions as (symbol, quantity, is_short, product_type).
+    /// Used by the engine for MIS auto-squareoff.
+    pub fn positions_snapshot(&self) -> Vec<(String, i32, bool, ProductType)> {
+        self.positions
+            .values()
+            .map(|p| (p.symbol.clone(), p.quantity, p.is_short, p.product_type))
+            .collect()
     }
 }
 
@@ -434,18 +533,21 @@ mod tests {
     }
 
     #[test]
-    fn test_sell_without_position_is_rejected() {
+    fn test_sell_without_position_creates_short() {
         let mut pm = PortfolioManager::new(1_000_000.0);
 
-        // Try to sell without any position — should be ignored
+        // Sell without any position — should create a short position
         pm.apply_fill(&sell_fill("RELIANCE", 10, 2600.0, 1_000), 50.0);
 
-        // Cash should be unchanged (sell was rejected)
-        assert!((pm.cash() - 1_000_000.0).abs() < f64::EPSILON);
-        // No closed trades
+        // Cash should increase by sale proceeds minus costs: 10 * 2600 - 50 = 25950
+        assert!((pm.cash() - 1_025_950.0).abs() < f64::EPSILON);
+        // No closed trades yet
         assert!(pm.closed_trades().is_empty());
-        // No position created
-        assert!(pm.position("RELIANCE").is_none());
+        // Short position should exist
+        let pos = pm.position("RELIANCE").expect("short position should exist");
+        assert_eq!(pos.quantity, 10);
+        assert!(pos.is_short);
+        assert!((pos.avg_price - 2600.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -492,5 +594,200 @@ mod tests {
         // net_pnl = 1000 - 200 = 800
         assert!((trade.pnl - 800.0).abs() < f64::EPSILON);
         assert!((trade.costs - 200.0).abs() < f64::EPSILON);
+    }
+
+    // ── Short selling tests ─────────────────────────────────────────────
+
+    fn sell_fill_mis(symbol: &str, qty: i32, price: f64, ts: i64) -> Fill {
+        Fill {
+            symbol: symbol.to_string(),
+            side: Side::Sell,
+            quantity: qty,
+            fill_price: price,
+            timestamp_ms: ts,
+            product_type: ProductType::Mis,
+            costs: 0.0,
+        }
+    }
+
+    fn buy_fill_mis(symbol: &str, qty: i32, price: f64, ts: i64) -> Fill {
+        Fill {
+            symbol: symbol.to_string(),
+            side: Side::Buy,
+            quantity: qty,
+            fill_price: price,
+            timestamp_ms: ts,
+            product_type: ProductType::Mis,
+            costs: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_short_sell_creates_short_position() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Sell 10 shares at 100 — no existing position, should create short
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 0.0);
+
+        let pos = pm.position("TEST").expect("short position should exist");
+        assert_eq!(pos.quantity, 10);
+        assert!(pos.is_short);
+        assert!((pos.avg_price - 100.0).abs() < f64::EPSILON);
+
+        // Cash should increase by short sale proceeds: 10 * 100 = 1000
+        assert!((pm.cash() - 1_001_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_buy_closes_short_position() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Short 10 at 100
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 0.0);
+
+        // Buy 10 at 90 (cover the short)
+        pm.apply_fill(&buy_fill("TEST", 10, 90.0, 2_000), 0.0);
+
+        // Position should be closed
+        assert!(pm.position("TEST").is_none());
+
+        // Should have one closed trade with direction=Short
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, Direction::Short);
+        assert_eq!(trades[0].quantity, 10);
+        assert!((trades[0].entry_price - 100.0).abs() < f64::EPSILON);
+        assert!((trades[0].exit_price - 90.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_short_pnl_correct() {
+        // Short at 100, cover at 90 => profit
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 5.0); // entry costs
+        pm.apply_fill(&buy_fill("TEST", 10, 90.0, 2_000), 5.0);   // exit costs
+
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+        // gross_pnl = (100 - 90) * 10 = 100
+        // total_costs = 5 + 5 = 10
+        // net_pnl = 100 - 10 = 90
+        assert!((trades[0].pnl - 90.0).abs() < f64::EPSILON);
+        assert!(trades[0].pnl > 0.0, "short pnl should be positive when price drops");
+    }
+
+    #[test]
+    fn test_short_pnl_loss() {
+        // Short at 100, cover at 110 => loss
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 5.0);
+        pm.apply_fill(&buy_fill("TEST", 10, 110.0, 2_000), 5.0);
+
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+        // gross_pnl = (100 - 110) * 10 = -100
+        // total_costs = 5 + 5 = 10
+        // net_pnl = -100 - 10 = -110
+        assert!((trades[0].pnl - (-110.0)).abs() < f64::EPSILON);
+        assert!(trades[0].pnl < 0.0, "short pnl should be negative when price rises");
+    }
+
+    #[test]
+    fn test_short_equity_calculation() {
+        // Short position, price rises => equity falls
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Short 10 at 100 (no costs for simplicity)
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 0.0);
+        // Cash should be 1_000_000 + 10*100 = 1_001_000
+
+        // Price rises to 110
+        let mut prices = HashMap::new();
+        prices.insert("TEST".to_string(), 110.0);
+        pm.update_prices(&prices, 2_000);
+
+        // equity = cash - short_market_value = 1_001_000 - 10*110 = 1_001_000 - 1_100 = 999_900
+        let eq = pm.equity();
+        assert!((eq - 999_900.0).abs() < f64::EPSILON);
+        assert!(eq < 1_000_000.0, "equity should fall when short position price rises");
+    }
+
+    #[test]
+    fn test_short_equity_price_drop() {
+        // Short position, price drops => equity rises
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Short 10 at 100
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 0.0);
+
+        // Price drops to 90
+        let mut prices = HashMap::new();
+        prices.insert("TEST".to_string(), 90.0);
+        pm.update_prices(&prices, 2_000);
+
+        // equity = cash - short_market_value = 1_001_000 - 10*90 = 1_001_000 - 900 = 1_000_100
+        let eq = pm.equity();
+        assert!((eq - 1_000_100.0).abs() < f64::EPSILON);
+        assert!(eq > 1_000_000.0, "equity should rise when short position price drops");
+    }
+
+    #[test]
+    fn test_portfolio_state_reports_negative_qty_for_shorts() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Short 10 at 100
+        pm.apply_fill(&sell_fill("TEST", 10, 100.0, 1_000), 0.0);
+
+        let portfolio = pm.portfolio_state();
+        assert_eq!(portfolio.positions.len(), 1);
+        let pos = &portfolio.positions[0];
+        assert_eq!(pos.symbol, "TEST");
+        assert_eq!(pos.quantity, -10, "short positions should report negative quantity");
+        assert!((pos.avg_price - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_positions_snapshot() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Buy a CNC position
+        pm.apply_fill(&buy_fill("LONG", 10, 100.0, 1_000), 0.0);
+
+        // Short an MIS position
+        pm.apply_fill(&sell_fill_mis("SHORT", 5, 200.0, 2_000), 0.0);
+
+        let snapshot = pm.positions_snapshot();
+        assert_eq!(snapshot.len(), 2);
+
+        // Find each position in snapshot
+        let long_pos = snapshot.iter().find(|(s, _, _, _)| s == "LONG");
+        let short_pos = snapshot.iter().find(|(s, _, _, _)| s == "SHORT");
+
+        assert!(long_pos.is_some());
+        let (_, qty, is_short, pt) = long_pos.unwrap();
+        assert_eq!(*qty, 10);
+        assert!(!is_short);
+        assert_eq!(*pt, ProductType::Cnc);
+
+        assert!(short_pos.is_some());
+        let (_, qty, is_short, pt) = short_pos.unwrap();
+        assert_eq!(*qty, 5);
+        assert!(*is_short);
+        assert_eq!(*pt, ProductType::Mis);
+    }
+
+    #[test]
+    fn test_closed_trade_direction_long() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Buy then sell — long trade
+        pm.apply_fill(&buy_fill("TEST", 10, 100.0, 1_000), 0.0);
+        pm.apply_fill(&sell_fill("TEST", 10, 110.0, 2_000), 0.0);
+
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, Direction::Long);
     }
 }

@@ -389,6 +389,60 @@ impl BacktestEngine {
                 }
             }
 
+            // h. Auto-squareoff MIS positions at 15:20 IST
+            let ist = chrono::FixedOffset::east_opt(19800).unwrap();
+            if let Some(dt) = chrono::DateTime::from_timestamp_millis(*timestamp) {
+                let ist_time = dt.with_timezone(&ist).time();
+                let squareoff_time = chrono::NaiveTime::from_hms_opt(15, 20, 0).unwrap();
+                if ist_time >= squareoff_time {
+                    let mis_positions: Vec<(String, i32, bool)> = portfolio
+                        .positions_snapshot()
+                        .into_iter()
+                        .filter(|(_, _, _, pt)| *pt == ProductType::Mis)
+                        .map(|(sym, qty, is_short, _)| (sym, qty, is_short))
+                        .collect();
+
+                    for (symbol, qty, is_short) in mis_positions {
+                        // Close position: sell if long, buy if short
+                        let price = finest_bar_group
+                            .iter()
+                            .find(|b| b.symbol == symbol)
+                            .map(|b| b.close)
+                            .unwrap_or(0.0);
+                        if price > 0.0 && qty > 0 {
+                            let side = if is_short { Side::Buy } else { Side::Sell };
+                            let is_intraday = true; // MIS is always intraday
+                            let inst_type = instrument_type_map
+                                .get(&symbol)
+                                .copied()
+                                .unwrap_or(InstrumentType::Equity);
+                            let trade_value = qty as f64 * price;
+                            let params = TradeParams {
+                                instrument_type: inst_type,
+                                is_intraday,
+                                buy_value: if side == Side::Buy { trade_value } else { 0.0 },
+                                sell_value: if side == Side::Sell { trade_value } else { 0.0 },
+                                quantity: qty,
+                            };
+                            let costs = cost_model.calculate(&params);
+                            let total_costs = costs.total();
+                            let mut fill = Fill {
+                                symbol: symbol.clone(),
+                                side,
+                                quantity: qty,
+                                fill_price: price,
+                                timestamp_ms: *timestamp,
+                                product_type: ProductType::Mis,
+                                costs: total_costs,
+                            };
+                            portfolio.apply_fill(&fill, total_costs);
+                            fill.costs = total_costs;
+                            current_fills.push(fill);
+                        }
+                    }
+                }
+            }
+
             // Save for next iteration
             last_fills = current_fills;
             last_rejections = current_rejections;
@@ -908,5 +962,238 @@ mod tests {
             result.trades.is_empty(),
             "buy for EXPENSIVE should be blocked — margin uses correct symbol price"
         );
+    }
+
+    /// Helper: create a timestamp in millis for a given IST hour:minute on 2024-01-15.
+    fn ist_timestamp_ms(hour: u32, minute: u32) -> i64 {
+        let ist = chrono::FixedOffset::east_opt(19800).unwrap();
+        let dt = chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap();
+        let ist_dt = dt.and_local_timezone(ist).unwrap();
+        ist_dt.timestamp_millis()
+    }
+
+    #[tokio::test]
+    async fn test_mis_auto_squareoff() {
+        // Strategy buys MIS at bar 2, the engine should auto-squareoff at 15:20 IST
+        struct MisBuyStrategy {
+            call_count: AtomicUsize,
+        }
+
+        impl MisBuyStrategy {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl StrategyClient for MisBuyStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "15minute".into(),
+                    lookback: 200,
+                }])
+            }
+            async fn initialize(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: &[InstrumentData],
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot
+                    .timeframes
+                    .values()
+                    .next()
+                    .and_then(|m| m.keys().next().cloned())
+                    .unwrap_or_default();
+                if count == 2 {
+                    // Buy MIS
+                    Ok(vec![Signal {
+                        action: Action::Buy,
+                        symbol,
+                        quantity: 10,
+                        order_type: crate::types::OrderType::Market,
+                        limit_price: 0.0,
+                        stop_price: 0.0,
+                        product_type: ProductType::Mis,
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        // Create bars at 15-minute intervals throughout the trading day
+        // Bars from 9:15 to 15:30 IST = 26 bars (index 0=9:15, ..., 25=15:30)
+        // Bar at index 25 (15:30) is >= 15:20 squareoff time
+        let bars: Vec<Bar> = (0..26)
+            .map(|i| {
+                let ts = ist_timestamp_ms(9, 15) + (i as i64) * 15 * 60 * 1000;
+                Bar {
+                    timestamp_ms: ts,
+                    symbol: "TEST".into(),
+                    open: 100.0 + i as f64,
+                    high: 102.0 + i as f64,
+                    low: 99.0 + i as f64,
+                    close: 101.0 + i as f64,
+                    volume: 1000,
+                    oi: 0,
+                }
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("15minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "15minute".into(),
+            lookback: 200,
+        }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "mis_test".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-15".into(),
+                end_date: "2024-01-15".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute15,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 200,
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &MisBuyStrategy::new(),
+            vec![],
+            &requirements,
+        )
+        .await
+        .unwrap();
+
+        // The MIS position should have been auto-squared off at 15:20 IST
+        // Strategy buys at bar 2 (9:30 IST), engine closes at 15:20 IST
+        assert!(
+            !result.trades.is_empty(),
+            "MIS position should have been auto-squared off"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cnc_not_squaredoff() {
+        // Strategy buys CNC at bar 2, should NOT be squared off at 15:20
+        struct CncBuyStrategy {
+            call_count: AtomicUsize,
+        }
+
+        impl CncBuyStrategy {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl StrategyClient for CncBuyStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "15minute".into(),
+                    lookback: 200,
+                }])
+            }
+            async fn initialize(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: &[InstrumentData],
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot
+                    .timeframes
+                    .values()
+                    .next()
+                    .and_then(|m| m.keys().next().cloned())
+                    .unwrap_or_default();
+                if count == 2 {
+                    // Buy CNC (delivery)
+                    Ok(vec![Signal::market_buy(&symbol, 10)])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let bars: Vec<Bar> = (0..26)
+            .map(|i| {
+                let ts = ist_timestamp_ms(9, 15) + (i as i64) * 15 * 60 * 1000;
+                Bar {
+                    timestamp_ms: ts,
+                    symbol: "TEST".into(),
+                    open: 100.0 + i as f64,
+                    high: 102.0 + i as f64,
+                    low: 99.0 + i as f64,
+                    close: 101.0 + i as f64,
+                    volume: 1000,
+                    oi: 0,
+                }
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("15minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "15minute".into(),
+            lookback: 200,
+        }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "cnc_test".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-15".into(),
+                end_date: "2024-01-15".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute15,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 200,
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &CncBuyStrategy::new(),
+            vec![],
+            &requirements,
+        )
+        .await
+        .unwrap();
+
+        // CNC positions should NOT be auto-squared off at 15:20
+        assert!(
+            result.trades.is_empty(),
+            "CNC position should NOT be auto-squared off"
+        );
+        // Verify final equity includes the open position value
+        assert!(result.final_equity > 0.0);
     }
 }
