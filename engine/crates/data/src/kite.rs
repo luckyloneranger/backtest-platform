@@ -1,8 +1,26 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use serde::Deserialize;
 
 use backtest_core::types::{Bar, Exchange, Instrument, InstrumentType, Interval};
+
+// ── Quote API types ─────────────────────────────────────────────────────────
+
+/// Data returned by the Kite /quote endpoint for a single instrument.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuoteData {
+    pub last_price: f64,
+    #[serde(default)]
+    pub lower_circuit_limit: f64,
+    #[serde(default)]
+    pub upper_circuit_limit: f64,
+    #[serde(default)]
+    pub volume: i64,
+    #[serde(default)]
+    pub oi: f64,
+}
 
 // ── KiteClient ──────────────────────────────────────────────────────────────
 
@@ -126,6 +144,48 @@ impl KiteClient {
             .context("failed to read candles response body")?;
 
         parse_candles_json(&json_text, symbol)
+    }
+
+    /// Fetch quote data for one or more instruments.
+    /// `instrument_keys` are in format "EXCHANGE:SYMBOL", e.g. "NSE:RELIANCE".
+    /// Returns a map from instrument key to QuoteData.
+    pub async fn fetch_quotes(
+        &self,
+        instrument_keys: &[&str],
+    ) -> Result<HashMap<String, QuoteData>> {
+        let url = format!("{}/quote", self.base_url);
+
+        let params: Vec<(&str, &str)> = instrument_keys.iter().map(|k| ("i", *k)).collect();
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .query(&params)
+            .send()
+            .await
+            .context("failed to send quote request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("quote endpoint returned HTTP {}: {}", status.as_u16(), body);
+        }
+
+        let json_text = resp
+            .text()
+            .await
+            .context("failed to read quote response")?;
+
+        #[derive(Deserialize)]
+        struct QuoteResponse {
+            data: HashMap<String, QuoteData>,
+        }
+
+        let response: QuoteResponse =
+            serde_json::from_str(&json_text).context("failed to parse quote JSON")?;
+
+        Ok(response.data)
     }
 
     /// Maximum candles returned by a single Kite historical-data request.

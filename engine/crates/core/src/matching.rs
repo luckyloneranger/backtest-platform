@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::types::{Action, Bar, OrderType, Signal};
 
 // ── Side ────────────────────────────────────────────────────────────────────
@@ -117,11 +119,21 @@ pub struct Fill {
     pub timestamp_ms: i64,
 }
 
+// ── CircuitLimits ──────────────────────────────────────────────────────────
+
+/// Per-symbol circuit limit bounds.
+#[derive(Debug, Clone)]
+pub struct CircuitLimits {
+    pub lower: f64,
+    pub upper: f64,
+}
+
 // ── OrderMatcher ────────────────────────────────────────────────────────────
 
 pub struct OrderMatcher {
     pending: Vec<Order>,
     slippage_pct: f64,
+    circuit_limits: HashMap<String, CircuitLimits>,
 }
 
 impl OrderMatcher {
@@ -129,6 +141,20 @@ impl OrderMatcher {
         Self {
             pending: Vec::new(),
             slippage_pct,
+            circuit_limits: HashMap::new(),
+        }
+    }
+
+    /// Set circuit limits for a symbol. If set, fills outside these bounds are rejected.
+    pub fn set_circuit_limits(&mut self, symbol: &str, limits: CircuitLimits) {
+        self.circuit_limits.insert(symbol.to_string(), limits);
+    }
+
+    /// Check if a fill price is within circuit limits for the symbol.
+    fn within_circuit_limits(&self, symbol: &str, price: f64) -> bool {
+        match self.circuit_limits.get(symbol) {
+            Some(limits) => price >= limits.lower && price <= limits.upper,
+            None => true, // no limits = no restriction
         }
     }
 
@@ -140,7 +166,9 @@ impl OrderMatcher {
         let mut fills = Vec::new();
         let mut remaining = Vec::new();
 
-        for order in self.pending.drain(..) {
+        let orders: Vec<Order> = self.pending.drain(..).collect();
+
+        for order in orders {
             // Only process orders that match the bar's symbol.
             if order.symbol != bar.symbol {
                 remaining.push(order);
@@ -151,48 +179,66 @@ impl OrderMatcher {
                 // ── Market orders: fill at bar.open adjusted for slippage ────
                 (OrderType::Market, Side::Buy) => {
                     let price = bar.open * (1.0 + self.slippage_pct);
-                    fills.push(Fill {
-                        symbol: order.symbol,
-                        side: Side::Buy,
-                        quantity: order.quantity,
-                        fill_price: price,
-                        timestamp_ms: bar.timestamp_ms,
-                    });
-                }
-                (OrderType::Market, Side::Sell) => {
-                    let price = bar.open * (1.0 - self.slippage_pct);
-                    fills.push(Fill {
-                        symbol: order.symbol,
-                        side: Side::Sell,
-                        quantity: order.quantity,
-                        fill_price: price,
-                        timestamp_ms: bar.timestamp_ms,
-                    });
-                }
-
-                // ── Limit orders ────────────────────────────────────────────
-                (OrderType::Limit, Side::Buy) => {
-                    if bar.low <= order.limit_price {
+                    if self.within_circuit_limits(&order.symbol, price) {
                         fills.push(Fill {
                             symbol: order.symbol,
                             side: Side::Buy,
                             quantity: order.quantity,
-                            fill_price: order.limit_price,
+                            fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
                         });
                     } else {
                         remaining.push(order);
                     }
                 }
-                (OrderType::Limit, Side::Sell) => {
-                    if bar.high >= order.limit_price {
+                (OrderType::Market, Side::Sell) => {
+                    let price = bar.open * (1.0 - self.slippage_pct);
+                    if self.within_circuit_limits(&order.symbol, price) {
                         fills.push(Fill {
                             symbol: order.symbol,
                             side: Side::Sell,
                             quantity: order.quantity,
-                            fill_price: order.limit_price,
+                            fill_price: price,
                             timestamp_ms: bar.timestamp_ms,
                         });
+                    } else {
+                        remaining.push(order);
+                    }
+                }
+
+                // ── Limit orders ────────────────────────────────────────────
+                (OrderType::Limit, Side::Buy) => {
+                    if bar.low <= order.limit_price {
+                        let price = order.limit_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Buy,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
+                    } else {
+                        remaining.push(order);
+                    }
+                }
+                (OrderType::Limit, Side::Sell) => {
+                    if bar.high >= order.limit_price {
+                        let price = order.limit_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Sell,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
                     } else {
                         remaining.push(order);
                     }
@@ -201,26 +247,36 @@ impl OrderMatcher {
                 // ── Stop-loss orders (SL): fill at stop_price ───────────────
                 (OrderType::Sl, Side::Sell) => {
                     if bar.low <= order.stop_price {
-                        fills.push(Fill {
-                            symbol: order.symbol,
-                            side: Side::Sell,
-                            quantity: order.quantity,
-                            fill_price: order.stop_price,
-                            timestamp_ms: bar.timestamp_ms,
-                        });
+                        let price = order.stop_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Sell,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
                     } else {
                         remaining.push(order);
                     }
                 }
                 (OrderType::Sl, Side::Buy) => {
                     if bar.high >= order.stop_price {
-                        fills.push(Fill {
-                            symbol: order.symbol,
-                            side: Side::Buy,
-                            quantity: order.quantity,
-                            fill_price: order.stop_price,
-                            timestamp_ms: bar.timestamp_ms,
-                        });
+                        let price = order.stop_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Buy,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
                     } else {
                         remaining.push(order);
                     }
@@ -229,26 +285,36 @@ impl OrderMatcher {
                 // ── Stop-loss market (SL-M): trigger like SL, fill at stop_price ─
                 (OrderType::SlM, Side::Sell) => {
                     if bar.low <= order.stop_price {
-                        fills.push(Fill {
-                            symbol: order.symbol,
-                            side: Side::Sell,
-                            quantity: order.quantity,
-                            fill_price: order.stop_price,
-                            timestamp_ms: bar.timestamp_ms,
-                        });
+                        let price = order.stop_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Sell,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
                     } else {
                         remaining.push(order);
                     }
                 }
                 (OrderType::SlM, Side::Buy) => {
                     if bar.high >= order.stop_price {
-                        fills.push(Fill {
-                            symbol: order.symbol,
-                            side: Side::Buy,
-                            quantity: order.quantity,
-                            fill_price: order.stop_price,
-                            timestamp_ms: bar.timestamp_ms,
-                        });
+                        let price = order.stop_price;
+                        if self.within_circuit_limits(&order.symbol, price) {
+                            fills.push(Fill {
+                                symbol: order.symbol,
+                                side: Side::Buy,
+                                quantity: order.quantity,
+                                fill_price: price,
+                                timestamp_ms: bar.timestamp_ms,
+                            });
+                        } else {
+                            remaining.push(order);
+                        }
                     } else {
                         remaining.push(order);
                     }
@@ -373,5 +439,81 @@ mod tests {
         let fills2 = matcher.process_bar(&bar2);
         assert_eq!(fills2.len(), 1);
         assert!((fills2[0].fill_price - 2400.0).abs() < f64::EPSILON);
+    }
+
+    // ── Circuit limit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_circuit_limit_rejects_market_order() {
+        let mut matcher = OrderMatcher::new(0.0);
+        matcher.set_circuit_limits(
+            "TEST",
+            CircuitLimits {
+                lower: 90.0,
+                upper: 110.0,
+            },
+        );
+        matcher.submit(Order::market_buy("TEST", 10));
+        // Bar opens at 115 which is above upper circuit
+        let bar = Bar {
+            timestamp_ms: 1000,
+            symbol: "TEST".into(),
+            open: 115.0,
+            high: 120.0,
+            low: 112.0,
+            close: 118.0,
+            volume: 100000,
+            oi: 0,
+        };
+        let fills = matcher.process_bar(&bar);
+        assert!(
+            fills.is_empty(),
+            "order should be rejected - fill price above circuit upper"
+        );
+    }
+
+    #[test]
+    fn test_circuit_limit_allows_within_range() {
+        let mut matcher = OrderMatcher::new(0.0);
+        matcher.set_circuit_limits(
+            "TEST",
+            CircuitLimits {
+                lower: 90.0,
+                upper: 110.0,
+            },
+        );
+        matcher.submit(Order::market_buy("TEST", 10));
+        let bar = Bar {
+            timestamp_ms: 1000,
+            symbol: "TEST".into(),
+            open: 100.0,
+            high: 105.0,
+            low: 95.0,
+            close: 102.0,
+            volume: 100000,
+            oi: 0,
+        };
+        let fills = matcher.process_bar(&bar);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].fill_price, 100.0);
+    }
+
+    #[test]
+    fn test_no_circuit_limits_allows_all() {
+        let mut matcher = OrderMatcher::new(0.0);
+        // No circuit limits set
+        matcher.submit(Order::market_buy("TEST", 10));
+        let bar = Bar {
+            timestamp_ms: 1000,
+            symbol: "TEST".into(),
+            open: 5000.0,
+            high: 5100.0,
+            low: 4900.0,
+            close: 5050.0,
+            volume: 100000,
+            oi: 0,
+        };
+        let fills = matcher.process_bar(&bar);
+        assert_eq!(fills.len(), 1); // should fill normally
     }
 }
