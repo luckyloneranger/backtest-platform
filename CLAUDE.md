@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (14 tests)
+pytest tests/ -v                     # run strategy tests (21 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -98,3 +98,6 @@ Per timestamp: process pending orders (with circuit limit + margin checks) → u
 - Order rejections (circuit limit, margin) are tracked and sent to strategies via `MarketSnapshot.rejections`
 - Strategies declare data needs via `required_data()` — engine loads and serves accordingly
 - Multi-timeframe: engine ticks at finest interval, coarser bars appear only when their candle closes
+- Signals include `product_type`: `CNC` (equity delivery), `MIS` (equity intraday), `NRML` (F&O overnight). Engine derives `is_intraday` from this for cost calculation.
+- Zerodha charges zero brokerage on all equity trades (CNC and MIS). ₹20/order only applies to F&O.
+- Cost model (`ZerodhaCostModel`): zero equity brokerage, STT (0.1% delivery both sides, 0.025% intraday sell-only), transaction charges, GST, SEBI fees, stamp duty

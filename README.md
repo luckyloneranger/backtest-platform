@@ -10,7 +10,8 @@ An Indian market backtesting platform for evaluating trading strategies against 
 - **Multi-timeframe support** — strategies declare which intervals they need; engine loads and serves all of them
 - **Rich strategy context** — strategies receive lookback bars, instrument metadata, fill feedback, order rejections, trade history, and session context via `MarketSnapshot`
 - **Zerodha Kite Connect integration** — fetch instruments, historical candles (minute to daily), OI data, continuous futures
-- **Indian market cost model** — Zerodha brokerage, STT, GST, SEBI fees, stamp duty
+- **Indian market cost model** — zero equity brokerage (Zerodha current pricing), STT, GST, SEBI fees, stamp duty; ₹20/order for F&O only
+- **Product type support** — strategies choose CNC (delivery), MIS (intraday), or NRML (F&O) per signal, with correct cost calculation for each
 - **Circuit limit checking** — optional order rejection at upper/lower circuit bounds
 - **Margin validation** — optional position sizing limits
 - **Performance metrics** — Sharpe, Sortino, Calmar, max drawdown, CAGR, win rate, profit factor
@@ -165,7 +166,7 @@ class MyStrategy(Strategy):
                 # Check daily trend for confirmation
                 daily_bars = snapshot.history.get((symbol, "day"), [])
                 if daily_bars and bar.close > daily_bars[-1].close * (1 + self.threshold):
-                    signals.append(Signal(action="BUY", symbol=symbol, quantity=qty))
+                    signals.append(Signal(action="BUY", symbol=symbol, quantity=qty, product_type="MIS"))
 
         # Check for rejected orders from last bar
         for rejection in snapshot.rejections:
@@ -194,6 +195,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 |----------|-----------|-------------|
 | `sma_crossover` | day | Simple Moving Average crossover (golden/death cross) |
 | `rsi_daily_trend` | 15min + day | RSI for entry timing, daily EMA for trend filter, dynamic position sizing |
+| `donchian_breakout` | 15min + day | Donchian channel breakout with volume confirmation and ATR trailing stop |
 
 ## Strategy Interface
 
@@ -220,7 +222,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 ### Signal fields
 
-`action` (BUY/SELL/HOLD), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`
+`action` (BUY/SELL/HOLD), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`, `product_type` (CNC/MIS/NRML)
 
 ## Running Tests
 
@@ -228,7 +230,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (98 tests)
 cd engine && cargo test
 
-# Python (14 tests)
+# Python (21 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
