@@ -15,9 +15,8 @@ from strategies.base import Bar, Portfolio, Position, Signal
 
 # ------------------------------------------------------------------
 # Import strategy modules here so that the @register decorators run.
-# Example (uncomment when strategies exist):
-#   import strategies.sma_crossover  # noqa: F401
 # ------------------------------------------------------------------
+import strategies.examples.sma_crossover  # noqa: F401
 
 
 class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
