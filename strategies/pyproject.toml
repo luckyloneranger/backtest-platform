@@ -6,6 +6,7 @@ dependencies = [
     "grpcio>=1.68",
     "grpcio-tools>=1.68",
     "protobuf>=5",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
