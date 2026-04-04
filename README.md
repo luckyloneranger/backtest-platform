@@ -99,11 +99,11 @@ python -m server.server
 
 ## Using Real Market Data
 
-### Set up Kite Connect credentials
+### Set up credentials
 
 ```bash
 cp .env.example .env
-# Edit .env with your API key and secret
+# Edit .env with your Kite Connect and (optionally) Azure OpenAI credentials
 ```
 
 The access token must be refreshed daily via Kite's login flow:
@@ -129,6 +129,16 @@ backtest data fetch --symbol NIFTY25APRFUT --from 2024-01-01 --to 2025-03-31 --c
 # List cached data
 backtest data list
 ```
+
+### Set up Azure OpenAI (for LLM strategies)
+
+```bash
+export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+export AZURE_OPENAI_API_KEY=your_api_key
+export AZURE_OPENAI_DEPLOYMENT=gpt-4o
+```
+
+Or add these to your `.env` file. Required only when running LLM-based strategies like `llm_signal_generator`.
 
 ## Writing a Strategy
 
