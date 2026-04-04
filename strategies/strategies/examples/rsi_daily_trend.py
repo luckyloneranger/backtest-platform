@@ -148,7 +148,7 @@ class RsiDailyTrend(Strategy):
                 if qty > 0:
                     signals.append(Signal(
                         action="BUY", symbol=symbol, quantity=qty,
-                        product_type="CNC",
+                        product_type="MIS",
                     ))
                     self.in_position[symbol] = True
 
@@ -175,7 +175,7 @@ class RsiDailyTrend(Strategy):
                     if held_qty > 0:
                         signals.append(Signal(
                             action="SELL", symbol=symbol, quantity=held_qty,
-                            product_type="CNC",
+                            product_type="MIS",
                         ))
                     self.in_position[symbol] = False
 
