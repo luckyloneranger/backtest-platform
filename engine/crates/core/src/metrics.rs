@@ -745,6 +745,7 @@ mod tests {
                 strategy_params: serde_json::json!({}),
                 slippage_pct: 0.0,
                 margin_available: None,
+                lookback_window: 200,
             },
             custom_metrics: serde_json::json!({}),
         };

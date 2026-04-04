@@ -11,7 +11,10 @@ from concurrent import futures
 from server.generated import strategy_pb2
 from server.generated import strategy_pb2_grpc
 from server.registry import get_strategy
-from strategies.base import Bar, Portfolio, Position, Signal
+from strategies.base import (
+    BarData, InstrumentInfo, Position, Portfolio, FillInfo,
+    OrderRejection, TradeInfo, SessionContext, MarketSnapshot, Signal,
+)
 
 # ------------------------------------------------------------------
 # Import strategy modules here so that the @register decorators run.
@@ -30,7 +33,24 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
         try:
             self.strategy = get_strategy(request.strategy_name)
             config = json.loads(request.config_json) if request.config_json else {}
-            self.strategy.initialize(config)
+
+            # Convert proto instruments to Python
+            instruments = {}
+            for inst in request.instruments:
+                instruments[inst.symbol] = InstrumentInfo(
+                    symbol=inst.symbol,
+                    exchange=inst.exchange,
+                    instrument_type=inst.instrument_type,
+                    lot_size=inst.lot_size,
+                    tick_size=inst.tick_size,
+                    expiry=inst.expiry,
+                    strike=inst.strike,
+                    option_type=inst.option_type,
+                    circuit_limit_upper=inst.circuit_limit_upper,
+                    circuit_limit_lower=inst.circuit_limit_lower,
+                )
+
+            self.strategy.initialize(config, instruments)
             return strategy_pb2.InitResponse(success=True, error="")
         except Exception as e:
             return strategy_pb2.InitResponse(success=False, error=str(e))
@@ -41,17 +61,24 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             context.set_details("Strategy not initialized. Call Initialize first.")
             return strategy_pb2.BarResponse()
 
-        bar = Bar(
-            timestamp_ms=request.timestamp_ms,
-            symbol=request.symbol,
-            open=request.open,
-            high=request.high,
-            low=request.low,
-            close=request.close,
-            volume=request.volume,
-            oi=request.oi,
-        )
+        # Convert bars
+        bars = {}
+        for b in request.bars:
+            bars[b.symbol] = BarData(
+                symbol=b.symbol, open=b.open, high=b.high,
+                low=b.low, close=b.close, volume=b.volume, oi=b.oi,
+            )
 
+        # Convert history
+        history = {}
+        for sh in request.history:
+            history[sh.symbol] = [
+                BarData(symbol=sh.symbol, open=b.open, high=b.high,
+                        low=b.low, close=b.close, volume=b.volume, oi=b.oi)
+                for b in sh.bars
+            ]
+
+        # Convert portfolio
         portfolio = Portfolio(
             cash=request.portfolio.cash,
             equity=request.portfolio.equity,
@@ -61,7 +88,62 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             ],
         )
 
-        signals = self.strategy.on_bar(bar, portfolio)
+        # Convert instruments
+        instruments = {}
+        for inst in request.instruments:
+            instruments[inst.symbol] = InstrumentInfo(
+                symbol=inst.symbol, exchange=inst.exchange,
+                instrument_type=inst.instrument_type, lot_size=inst.lot_size,
+                tick_size=inst.tick_size, expiry=inst.expiry, strike=inst.strike,
+                option_type=inst.option_type,
+                circuit_limit_upper=inst.circuit_limit_upper,
+                circuit_limit_lower=inst.circuit_limit_lower,
+            )
+
+        # Convert fills
+        fills = [
+            FillInfo(f.symbol, f.side, f.quantity, f.fill_price, f.costs, f.timestamp_ms)
+            for f in request.fills
+        ]
+
+        # Convert rejections
+        rejections = [
+            OrderRejection(r.symbol, r.side, r.quantity, r.reason)
+            for r in request.rejections
+        ]
+
+        # Convert closed trades
+        closed_trades = [
+            TradeInfo(t.symbol, t.quantity, t.entry_price, t.exit_price,
+                      t.entry_timestamp_ms, t.exit_timestamp_ms, t.pnl, t.costs)
+            for t in request.closed_trades
+        ]
+
+        # Convert context — in proto3 message fields are always present,
+        # so we always construct SessionContext from whatever is there.
+        ctx = SessionContext(
+            initial_capital=request.context.initial_capital,
+            bar_number=request.context.bar_number,
+            total_bars=request.context.total_bars,
+            start_date=request.context.start_date,
+            end_date=request.context.end_date,
+            interval=request.context.interval,
+            lookback_window=request.context.lookback_window,
+        )
+
+        snapshot = MarketSnapshot(
+            timestamp_ms=request.timestamp_ms,
+            bars=bars,
+            history=history,
+            portfolio=portfolio,
+            instruments=instruments,
+            fills=fills,
+            rejections=rejections,
+            closed_trades=closed_trades,
+            context=ctx,
+        )
+
+        signals = self.strategy.on_bar(snapshot)
 
         proto_signals = []
         for s in signals:

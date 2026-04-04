@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
-class Bar:
-    timestamp_ms: int
+class BarData:
     symbol: str
     open: float
     high: float
@@ -12,6 +11,20 @@ class Bar:
     close: float
     volume: int
     oi: int
+
+
+@dataclass
+class InstrumentInfo:
+    symbol: str
+    exchange: str
+    instrument_type: str     # "EQ", "FUT", "OPT", "COM"
+    lot_size: int
+    tick_size: float
+    expiry: str
+    strike: float
+    option_type: str         # "CE", "PE", or ""
+    circuit_limit_upper: float
+    circuit_limit_lower: float
 
 
 @dataclass
@@ -30,8 +43,49 @@ class Portfolio:
 
 
 @dataclass
+class FillInfo:
+    symbol: str
+    side: str                # "BUY", "SELL"
+    quantity: int
+    fill_price: float
+    costs: float
+    timestamp_ms: int
+
+
+@dataclass
+class OrderRejection:
+    symbol: str
+    side: str
+    quantity: int
+    reason: str              # "CIRCUIT_LIMIT", "INSUFFICIENT_MARGIN"
+
+
+@dataclass
+class TradeInfo:
+    symbol: str
+    quantity: int
+    entry_price: float
+    exit_price: float
+    entry_timestamp_ms: int
+    exit_timestamp_ms: int
+    pnl: float
+    costs: float
+
+
+@dataclass
+class SessionContext:
+    initial_capital: float
+    bar_number: int
+    total_bars: int
+    start_date: str
+    end_date: str
+    interval: str
+    lookback_window: int
+
+
+@dataclass
 class Signal:
-    action: str    # "HOLD", "BUY", "SELL"
+    action: str              # "HOLD", "BUY", "SELL"
     symbol: str
     quantity: int
     order_type: str = "MARKET"    # "MARKET", "LIMIT", "SL", "SL_M"
@@ -39,15 +93,29 @@ class Signal:
     stop_price: float = 0.0
 
 
+@dataclass
+class MarketSnapshot:
+    """Full market context sent to strategy per on_bar call."""
+    timestamp_ms: int
+    bars: dict[str, BarData]
+    history: dict[str, list[BarData]]
+    portfolio: Portfolio
+    instruments: dict[str, InstrumentInfo]
+    fills: list[FillInfo]
+    rejections: list[OrderRejection]
+    closed_trades: list[TradeInfo]
+    context: SessionContext
+
+
 class Strategy(ABC):
     @abstractmethod
-    def initialize(self, config: dict) -> None:
-        """Called once with strategy parameters."""
+    def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
+        """Called once with strategy parameters and instrument metadata."""
         pass
 
     @abstractmethod
-    def on_bar(self, bar: Bar, portfolio: Portfolio) -> list[Signal]:
-        """Called on each new bar. Return list of signals."""
+    def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
+        """Called on each timestamp with full market snapshot."""
         pass
 
     def on_complete(self) -> dict:

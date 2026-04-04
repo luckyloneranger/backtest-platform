@@ -17,6 +17,13 @@ pub struct BacktestConfig {
     /// above this margin limit.
     #[serde(default)]
     pub margin_available: Option<f64>,
+    /// Number of historical bars to keep per symbol for strategy lookback.
+    #[serde(default = "default_lookback")]
+    pub lookback_window: usize,
+}
+
+fn default_lookback() -> usize {
+    200
 }
 
 #[cfg(test)]
@@ -35,6 +42,7 @@ mod tests {
             strategy_params: serde_json::json!({"fast": 10, "slow": 30}),
             slippage_pct: 0.05,
             margin_available: None,
+            lookback_window: 200,
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -56,6 +64,7 @@ mod tests {
             strategy_params: serde_json::json!({}),
             slippage_pct: 0.0,
             margin_available: None,
+            lookback_window: 200,
         };
 
         let json = serde_json::to_string(&config).expect("serialize");

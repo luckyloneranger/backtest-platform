@@ -1,7 +1,7 @@
 from collections import deque
 
 from server.registry import register
-from strategies.base import Strategy, Bar, Portfolio, Signal
+from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal
 
 
 @register("sma_crossover")
@@ -13,33 +13,35 @@ class SmaCrossover(Strategy):
     slow SMA (death cross).
     """
 
-    def initialize(self, config: dict) -> None:
+    def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
         self.fast_period = config.get("fast_period", 10)
         self.slow_period = config.get("slow_period", 30)
-        self.prices: deque[float] = deque(maxlen=self.slow_period)
-        self.prev_fast_above: bool | None = None
+        self.prices: dict[str, deque[float]] = {}
+        self.prev_fast_above: dict[str, bool | None] = {}
 
-    def on_bar(self, bar: Bar, portfolio: Portfolio) -> list[Signal]:
-        self.prices.append(bar.close)
-        if len(self.prices) < self.slow_period:
-            return []
+    def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
+        signals = []
 
-        fast_sma = sum(list(self.prices)[-self.fast_period:]) / self.fast_period
-        slow_sma = sum(self.prices) / len(self.prices)
-        fast_above = fast_sma > slow_sma
+        for symbol, bar in snapshot.bars.items():
+            if symbol not in self.prices:
+                self.prices[symbol] = deque(maxlen=self.slow_period)
+                self.prev_fast_above[symbol] = None
 
-        signals: list[Signal] = []
-        if self.prev_fast_above is not None:
-            if fast_above and not self.prev_fast_above:
-                # Golden cross: fast crosses above slow -> BUY
-                signals.append(Signal(
-                    action="BUY", symbol=bar.symbol, quantity=1,
-                ))
-            elif not fast_above and self.prev_fast_above:
-                # Death cross: fast crosses below slow -> SELL
-                signals.append(Signal(
-                    action="SELL", symbol=bar.symbol, quantity=1,
-                ))
+            self.prices[symbol].append(bar.close)
 
-        self.prev_fast_above = fast_above
+            if len(self.prices[symbol]) < self.slow_period:
+                continue
+
+            fast_sma = sum(list(self.prices[symbol])[-self.fast_period:]) / self.fast_period
+            slow_sma = sum(self.prices[symbol]) / len(self.prices[symbol])
+            fast_above = fast_sma > slow_sma
+
+            if self.prev_fast_above[symbol] is not None:
+                if fast_above and not self.prev_fast_above[symbol]:
+                    signals.append(Signal(action="BUY", symbol=symbol, quantity=1))
+                elif not fast_above and self.prev_fast_above[symbol]:
+                    signals.append(Signal(action="SELL", symbol=symbol, quantity=1))
+
+            self.prev_fast_above[symbol] = fast_above
+
         return signals

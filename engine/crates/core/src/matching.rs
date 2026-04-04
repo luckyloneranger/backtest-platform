@@ -128,6 +128,16 @@ pub struct CircuitLimits {
     pub upper: f64,
 }
 
+// ── OrderRejection ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct OrderRejection {
+    pub symbol: String,
+    pub side: Side,
+    pub quantity: i32,
+    pub reason: String,
+}
+
 // ── OrderMatcher ────────────────────────────────────────────────────────────
 
 pub struct OrderMatcher {
@@ -162,8 +172,9 @@ impl OrderMatcher {
         self.pending.push(order);
     }
 
-    pub fn process_bar(&mut self, bar: &Bar) -> Vec<Fill> {
+    pub fn process_bar(&mut self, bar: &Bar) -> (Vec<Fill>, Vec<OrderRejection>) {
         let mut fills = Vec::new();
+        let mut rejections = Vec::new();
         let mut remaining = Vec::new();
 
         let orders: Vec<Order> = self.pending.drain(..).collect();
@@ -188,7 +199,12 @@ impl OrderMatcher {
                             timestamp_ms: bar.timestamp_ms,
                         });
                     } else {
-                        remaining.push(order);
+                        rejections.push(OrderRejection {
+                            symbol: order.symbol,
+                            side: order.side,
+                            quantity: order.quantity,
+                            reason: "CIRCUIT_LIMIT".into(),
+                        });
                     }
                 }
                 (OrderType::Market, Side::Sell) => {
@@ -202,7 +218,12 @@ impl OrderMatcher {
                             timestamp_ms: bar.timestamp_ms,
                         });
                     } else {
-                        remaining.push(order);
+                        rejections.push(OrderRejection {
+                            symbol: order.symbol,
+                            side: order.side,
+                            quantity: order.quantity,
+                            reason: "CIRCUIT_LIMIT".into(),
+                        });
                     }
                 }
 
@@ -219,7 +240,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -237,7 +263,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -257,7 +288,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -275,7 +311,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -295,7 +336,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -313,7 +359,12 @@ impl OrderMatcher {
                                 timestamp_ms: bar.timestamp_ms,
                             });
                         } else {
-                            remaining.push(order);
+                            rejections.push(OrderRejection {
+                                symbol: order.symbol,
+                                side: order.side,
+                                quantity: order.quantity,
+                                reason: "CIRCUIT_LIMIT".into(),
+                            });
                         }
                     } else {
                         remaining.push(order);
@@ -323,7 +374,7 @@ impl OrderMatcher {
         }
 
         self.pending = remaining;
-        fills
+        (fills, rejections)
     }
 }
 
@@ -353,8 +404,9 @@ mod tests {
         matcher.submit(Order::market_buy("RELIANCE", 10));
 
         let bar = make_bar("RELIANCE", 2500.0, 2520.0, 2480.0, 2510.0, 1_000);
-        let fills = matcher.process_bar(&bar);
+        let (fills, rejections) = matcher.process_bar(&bar);
 
+        assert!(rejections.is_empty());
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].symbol, "RELIANCE");
         assert_eq!(fills[0].side, Side::Buy);
@@ -370,12 +422,12 @@ mod tests {
 
         // Bar1: low=2490, does NOT touch limit_price=2480 -> no fill
         let bar1 = make_bar("RELIANCE", 2500.0, 2520.0, 2490.0, 2510.0, 1_000);
-        let fills1 = matcher.process_bar(&bar1);
+        let (fills1, _) = matcher.process_bar(&bar1);
         assert!(fills1.is_empty());
 
         // Bar2: low=2475, touches limit_price=2480 -> fill at 2480
         let bar2 = make_bar("RELIANCE", 2495.0, 2510.0, 2475.0, 2500.0, 2_000);
-        let fills2 = matcher.process_bar(&bar2);
+        let (fills2, _) = matcher.process_bar(&bar2);
 
         assert_eq!(fills2.len(), 1);
         assert_eq!(fills2[0].side, Side::Buy);
@@ -389,7 +441,7 @@ mod tests {
         matcher.submit(Order::limit_sell("RELIANCE", 10, 2550.0));
 
         let bar = make_bar("RELIANCE", 2500.0, 2560.0, 2490.0, 2540.0, 1_000);
-        let fills = matcher.process_bar(&bar);
+        let (fills, _) = matcher.process_bar(&bar);
 
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].side, Side::Sell);
@@ -403,7 +455,7 @@ mod tests {
         matcher.submit(Order::stop_loss_sell("RELIANCE", 10, 2450.0));
 
         let bar = make_bar("RELIANCE", 2470.0, 2480.0, 2440.0, 2460.0, 1_000);
-        let fills = matcher.process_bar(&bar);
+        let (fills, _) = matcher.process_bar(&bar);
 
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].side, Side::Sell);
@@ -417,7 +469,7 @@ mod tests {
         matcher.submit(Order::market_buy("RELIANCE", 10));
 
         let bar = make_bar("RELIANCE", 2500.0, 2520.0, 2480.0, 2510.0, 1_000);
-        let fills = matcher.process_bar(&bar);
+        let (fills, _) = matcher.process_bar(&bar);
 
         assert_eq!(fills.len(), 1);
         // fill_price = 2500 * (1 + 0.001) = 2502.5
@@ -431,12 +483,12 @@ mod tests {
 
         // Bar where low=2450, does not touch 2400
         let bar = make_bar("RELIANCE", 2500.0, 2520.0, 2450.0, 2510.0, 1_000);
-        let fills = matcher.process_bar(&bar);
+        let (fills, _) = matcher.process_bar(&bar);
 
         assert!(fills.is_empty());
         // The order should still be pending -- submit another bar that touches it
         let bar2 = make_bar("RELIANCE", 2420.0, 2430.0, 2390.0, 2410.0, 2_000);
-        let fills2 = matcher.process_bar(&bar2);
+        let (fills2, _) = matcher.process_bar(&bar2);
         assert_eq!(fills2.len(), 1);
         assert!((fills2[0].fill_price - 2400.0).abs() < f64::EPSILON);
     }
@@ -465,11 +517,15 @@ mod tests {
             volume: 100000,
             oi: 0,
         };
-        let fills = matcher.process_bar(&bar);
+        let (fills, rejections) = matcher.process_bar(&bar);
         assert!(
             fills.is_empty(),
             "order should be rejected - fill price above circuit upper"
         );
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].reason, "CIRCUIT_LIMIT");
+        assert_eq!(rejections[0].symbol, "TEST");
+        assert_eq!(rejections[0].quantity, 10);
     }
 
     #[test]
@@ -493,7 +549,8 @@ mod tests {
             volume: 100000,
             oi: 0,
         };
-        let fills = matcher.process_bar(&bar);
+        let (fills, rejections) = matcher.process_bar(&bar);
+        assert!(rejections.is_empty());
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].fill_price, 100.0);
     }
@@ -513,7 +570,8 @@ mod tests {
             volume: 100000,
             oi: 0,
         };
-        let fills = matcher.process_bar(&bar);
+        let (fills, rejections) = matcher.process_bar(&bar);
+        assert!(rejections.is_empty());
         assert_eq!(fills.len(), 1); // should fill normally
     }
 }
