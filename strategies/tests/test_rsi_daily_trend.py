@@ -41,7 +41,6 @@ def make_snapshot(
 # --- Unit tests for indicators ---
 
 def test_compute_rsi_uptrend():
-    # Strictly rising prices → RSI should be high (near 100)
     prices = [100 + i for i in range(20)]
     rsi = compute_rsi(prices, 14)
     assert rsi is not None
@@ -49,7 +48,6 @@ def test_compute_rsi_uptrend():
 
 
 def test_compute_rsi_downtrend():
-    # Strictly falling prices → RSI should be low (near 0)
     prices = [100 - i for i in range(20)]
     rsi = compute_rsi(prices, 14)
     assert rsi is not None
@@ -66,7 +64,7 @@ def test_compute_ema_basic():
     prices = [10.0, 11.0, 12.0, 13.0, 14.0]
     ema = compute_ema(prices, 3)
     assert ema is not None
-    assert 12.0 < ema < 14.0  # EMA should be between SMA and last price
+    assert 12.0 < ema < 14.0
 
 
 def test_compute_ema_not_enough_data():
@@ -81,7 +79,6 @@ def test_no_signal_during_warmup():
     s = RsiDailyTrend()
     s.initialize({"rsi_period": 5, "ema_period": 3}, {})
 
-    # Feed a few bars — not enough for RSI
     for i in range(4):
         signals = s.on_bar(make_snapshot(i, close_15m=100.0, close_day=100.0))
         assert signals == []
@@ -91,7 +88,7 @@ def test_buy_on_rsi_oversold_with_uptrend():
     s = RsiDailyTrend()
     s.initialize({"rsi_period": 5, "rsi_oversold": 30, "ema_period": 3}, {})
 
-    # Establish daily uptrend (rising prices above EMA)
+    # Establish daily uptrend
     for i in range(5):
         s.on_bar(make_snapshot(i, close_day=100.0 + i * 2))
 
@@ -109,18 +106,16 @@ def test_no_buy_when_daily_trend_is_down():
     s = RsiDailyTrend()
     s.initialize({"rsi_period": 5, "rsi_oversold": 30, "ema_period": 3}, {})
 
-    # Establish daily downtrend (falling prices below EMA)
+    # Establish daily downtrend
     for i in range(5):
         s.on_bar(make_snapshot(i, close_day=100.0 - i * 5))
 
-    # Same 15-min drop — RSI goes oversold but daily trend is down
     prices = [100, 102, 104, 106, 108, 110, 105, 100, 95, 90]
     all_signals = []
     for i, p in enumerate(prices):
         signals = s.on_bar(make_snapshot(100 + i, close_15m=float(p)))
         all_signals.extend(signals)
 
-    # Should NOT buy because daily trend is down
     assert not any(sig.action == "BUY" for sig in all_signals)
 
 
@@ -137,7 +132,7 @@ def test_sell_on_rsi_overbought():
     for i, p in enumerate(prices_down):
         s.on_bar(make_snapshot(100 + i, close_15m=float(p)))
 
-    # Now rise to trigger overbought sell — include a position so sell has quantity
+    # Rise to trigger overbought sell
     prices_up = [92, 95, 100, 105, 110, 115, 120, 125, 130, 135]
     held = Position(symbol="TEST", quantity=200, avg_price=90.0, unrealized_pnl=0.0)
     all_signals = []
