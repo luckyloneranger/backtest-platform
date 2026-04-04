@@ -43,16 +43,10 @@ impl ZerodhaCostModel {
 
         // 1. Brokerage
         let total_brokerage = match params.instrument_type {
-            InstrumentType::Equity if !params.is_intraday => {
-                // Equity delivery: zero brokerage
-                0.0
-            }
             InstrumentType::Equity => {
-                // Equity intraday: 0.03% of turnover OR Rs 20 per order,
-                // whichever is lower — applied per side (buy + sell).
-                let buy_side = f64::min(20.0, 0.0003 * params.buy_value);
-                let sell_side = f64::min(20.0, 0.0003 * params.sell_value);
-                buy_side + sell_side
+                // Equity (both delivery and intraday): zero brokerage
+                // Zerodha removed all equity brokerage fees
+                0.0
             }
             InstrumentType::FutureFO | InstrumentType::OptionFO | InstrumentType::Commodity => {
                 // Flat Rs 20 per executed order, per side (buy + sell).
@@ -169,12 +163,10 @@ mod tests {
 
         let costs = model.calculate(&params);
 
-        // Brokerage: min(20, 0.03% * 250_000) buy side = min(20, 75) = 20
-        //            min(20, 0.03% * 252_500) sell side = min(20, 75.75) = 20
-        //            Total = 40
+        // Brokerage: 0 (Zerodha zero brokerage on all equity trades)
         assert!(
-            approx_eq(costs.total_brokerage, 40.0),
-            "Expected brokerage 40, got {}",
+            approx_eq(costs.total_brokerage, 0.0),
+            "Expected brokerage 0, got {}",
             costs.total_brokerage
         );
 
@@ -290,9 +282,8 @@ mod tests {
         // Transaction charges: 0.0000345 * 200_000 = 6.90
         let expected_txn = 0.0000345 * 200_000.0;
 
-        // Brokerage per side: min(20, 0.03% * 100_000) = min(20, 30) = 20
-        // Total brokerage = 40
-        let expected_brokerage = 40.0;
+        // Brokerage: 0 (zero brokerage on equity)
+        let expected_brokerage = 0.0;
 
         // GST: 18% of (brokerage + txn charges)
         let expected_gst = 0.18 * (expected_brokerage + expected_txn);
@@ -392,11 +383,10 @@ mod tests {
         assert!(costs.total() > 0.0, "Total costs must be > 0");
     }
 
-    // Test 10: Small intraday trade where 0.03% < Rs 20
+    // Test 10: Equity intraday also has zero brokerage
     #[test]
-    fn test_small_intraday_brokerage_uses_percentage() {
+    fn test_equity_intraday_zero_brokerage() {
         let model = ZerodhaCostModel;
-        // buy_value = 10_000 => 0.03% = 3.0 (< 20, so use 3.0)
         let params = TradeParams {
             instrument_type: InstrumentType::Equity,
             is_intraday: true,
@@ -407,13 +397,10 @@ mod tests {
 
         let costs = model.calculate(&params);
 
-        // buy side: min(20, 0.03% * 10_000) = min(20, 3.0) = 3.0
-        // sell side: min(20, 0.03% * 10_050) = min(20, 3.015) = 3.015
-        let expected = 3.0 + 3.015;
+        // Zero brokerage on all equity trades
         assert!(
-            approx_eq(costs.total_brokerage, expected),
-            "Expected brokerage {}, got {}",
-            expected,
+            approx_eq(costs.total_brokerage, 0.0),
+            "Expected brokerage 0, got {}",
             costs.total_brokerage
         );
     }
