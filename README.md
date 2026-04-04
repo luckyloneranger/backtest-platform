@@ -149,6 +149,7 @@ class MyStrategy(Strategy):
 
     def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
         self.threshold = config.get("threshold", 0.02)
+        self.risk_pct = config.get("risk_pct", 0.2)  # 20% of capital per trade
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
         signals = []
@@ -156,10 +157,15 @@ class MyStrategy(Strategy):
         # 5-minute bars available every tick
         if "5minute" in snapshot.timeframes:
             for symbol, bar in snapshot.timeframes["5minute"].items():
+                # Dynamic position sizing: allocate risk_pct of available cash
+                qty = int(snapshot.portfolio.cash * self.risk_pct / bar.close)
+                if qty <= 0:
+                    continue
+
                 # Check daily trend for confirmation
                 daily_bars = snapshot.history.get((symbol, "day"), [])
                 if daily_bars and bar.close > daily_bars[-1].close * (1 + self.threshold):
-                    signals.append(Signal(action="BUY", symbol=symbol, quantity=1))
+                    signals.append(Signal(action="BUY", symbol=symbol, quantity=qty))
 
         # Check for rejected orders from last bar
         for rejection in snapshot.rejections:
@@ -179,8 +185,15 @@ import strategies.examples.my_strategy  # noqa: F401
 Run:
 ```bash
 backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 2025-03-31 \
-  --capital 1000000 --params '{"threshold": 0.02}'
+  --capital 1000000 --params '{"threshold": 0.02, "risk_pct": 0.2}'
 ```
+
+### Included strategies
+
+| Strategy | Timeframes | Description |
+|----------|-----------|-------------|
+| `sma_crossover` | day | Simple Moving Average crossover (golden/death cross) |
+| `rsi_daily_trend` | 15min + day | RSI for entry timing, daily EMA for trend filter, dynamic position sizing |
 
 ## Strategy Interface
 
@@ -215,7 +228,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (98 tests)
 cd engine && cargo test
 
-# Python (3 tests)
+# Python (14 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end

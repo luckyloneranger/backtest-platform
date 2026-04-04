@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests
+pytest tests/ -v                     # run strategy tests (14 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
