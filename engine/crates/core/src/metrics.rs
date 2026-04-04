@@ -50,7 +50,7 @@ pub fn calculate_sortino(daily_returns: &[f64], annual_risk_free_rate: f64) -> f
         return 0.0;
     }
 
-    let downside_dev = (downside_sq.iter().sum::<f64>() / downside_sq.len() as f64).sqrt();
+    let downside_dev = (downside_sq.iter().sum::<f64>() / daily_returns.len() as f64).sqrt();
     if downside_dev == 0.0 {
         return 0.0;
     }
@@ -289,16 +289,13 @@ impl MetricsReport {
         // 2. Compute daily returns
         let daily_rets = daily_returns_from_equity(&daily_eq);
 
-        // 3. Compute the number of calendar days from config
-        let days = {
-            let start =
-                chrono::NaiveDate::parse_from_str(&result.config.start_date, "%Y-%m-%d");
-            let end =
-                chrono::NaiveDate::parse_from_str(&result.config.end_date, "%Y-%m-%d");
-            match (start, end) {
-                (Ok(s), Ok(e)) => (e - s).num_days().max(0) as u32,
-                _ => 0,
-            }
+        // 3. Derive actual calendar days from equity curve timestamps
+        let days = if result.equity_curve.len() >= 2 {
+            let first_ts = result.equity_curve.first().unwrap().timestamp_ms;
+            let last_ts = result.equity_curve.last().unwrap().timestamp_ms;
+            ((last_ts - first_ts) / 86_400_000).max(0) as u32
+        } else {
+            0
         };
 
         // 4. Compute ratio metrics (use 0% risk-free rate by default)
@@ -342,14 +339,15 @@ fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-/// Compute the population standard deviation of a slice. Returns 0.0 if fewer
-/// than 2 values.
+/// Compute the sample standard deviation of a slice. Returns 0.0 if fewer
+/// than 2 values. Uses Bessel's correction (N-1 denominator).
 fn std_dev(values: &[f64]) -> f64 {
     if values.len() < 2 {
         return 0.0;
     }
     let m = mean(values);
-    let variance = values.iter().map(|&v| (v - m).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance =
+        values.iter().map(|&v| (v - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
     variance.sqrt()
 }
 
@@ -656,9 +654,11 @@ mod tests {
     fn test_std_dev() {
         assert_eq!(std_dev(&[]), 0.0);
         assert_eq!(std_dev(&[5.0]), 0.0);
-        // std_dev of [2, 4, 4, 4, 5, 5, 7, 9] = 2.0
+        // sample std_dev of [2, 4, 4, 4, 5, 5, 7, 9]:
+        // mean = 5, sum_sq_dev = 32, sample_var = 32/7, sample_sd = sqrt(32/7)
         let vals = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
-        assert!((std_dev(&vals) - 2.0).abs() < 1e-10);
+        let expected = (32.0_f64 / 7.0).sqrt();
+        assert!((std_dev(&vals) - expected).abs() < 1e-10);
     }
 
     #[test]
