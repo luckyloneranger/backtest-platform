@@ -1,0 +1,80 @@
+syntax = "proto3";
+package backtest;
+
+service StrategyService {
+  rpc Initialize(InitRequest) returns (InitResponse);
+  rpc OnBar(BarEvent) returns (BarResponse);
+  rpc OnComplete(CompleteRequest) returns (CompleteResponse);
+}
+
+// --- Initialize ---
+
+message InitRequest {
+  string strategy_name = 1;
+  string config_json = 2;  // strategy parameters as JSON
+  repeated string symbols = 3;
+}
+
+message InitResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// --- Bar Event ---
+
+message BarEvent {
+  int64 timestamp_ms = 1;
+  string symbol = 2;
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double close = 6;
+  int64 volume = 7;
+  int64 oi = 8;
+  PortfolioState portfolio = 9;
+}
+
+message PortfolioState {
+  double cash = 1;
+  double equity = 2;
+  repeated PositionInfo positions = 3;
+}
+
+message PositionInfo {
+  string symbol = 1;
+  int32 quantity = 2;
+  double avg_price = 3;
+  double unrealized_pnl = 4;
+}
+
+message BarResponse {
+  repeated Signal signals = 1;
+}
+
+message Signal {
+  enum Action {
+    HOLD = 0;
+    BUY = 1;
+    SELL = 2;
+  }
+  enum OrderType {
+    MARKET = 0;
+    LIMIT = 1;
+    SL = 2;
+    SL_M = 3;
+  }
+  Action action = 1;
+  string symbol = 2;
+  int32 quantity = 3;
+  OrderType order_type = 4;
+  double limit_price = 5;
+  double stop_price = 6;
+}
+
+// --- Complete ---
+
+message CompleteRequest {}
+
+message CompleteResponse {
+  string custom_metrics_json = 1;  // optional JSON from strategy
+}

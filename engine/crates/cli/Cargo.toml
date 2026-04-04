@@ -1,0 +1,19 @@
+[package]
+name = "backtest-cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "backtest"
+path = "src/main.rs"
+
+[dependencies]
+backtest-core = { path = "../core" }
+backtest-data = { path = "../data" }
+backtest-proto = { path = "../proto" }
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rand = "0.8"
