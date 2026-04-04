@@ -61,8 +61,9 @@ impl Reporter {
     /// - `equity_curve.parquet` — equity curve time series
     /// - `metrics.json`       — computed performance metrics
     pub fn save(&self, result: &BacktestResult) -> Result<String> {
-        // 1. Generate a short ID (first 8 chars of UUID v4)
-        let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        // 1. Generate a short ID (first 12 hex chars of UUID v4, dashes stripped)
+        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let id = id[..12].to_string();
 
         // 2. Create the output directory
         let dir = self.base_path.join(&id);
@@ -333,8 +334,8 @@ mod tests {
         let result = mock_backtest_result("sma_crossover");
         let id = reporter.save(&result).unwrap();
 
-        // ID should be 8 characters
-        assert_eq!(id.len(), 8);
+        // ID should be 12 characters
+        assert_eq!(id.len(), 12);
 
         // Verify all 4 files exist
         let dir = tmp.path().join(&id);

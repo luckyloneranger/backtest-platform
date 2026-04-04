@@ -49,8 +49,8 @@ impl ZerodhaCostModel {
                 0.0
             }
             InstrumentType::FutureFO | InstrumentType::OptionFO | InstrumentType::Commodity => {
-                // Flat Rs 20 per executed order, per side (buy + sell).
-                40.0
+                // Flat Rs 20 per executed order (per side)
+                20.0
             }
         };
 
@@ -196,10 +196,10 @@ mod tests {
 
         let costs = model.calculate(&params);
 
-        // Brokerage: Rs 20 * 2 sides = 40
+        // Brokerage: Rs 20 per side
         assert!(
-            approx_eq(costs.total_brokerage, 40.0),
-            "Expected brokerage 40, got {}",
+            approx_eq(costs.total_brokerage, 20.0),
+            "Expected brokerage 20, got {}",
             costs.total_brokerage
         );
 
@@ -249,10 +249,10 @@ mod tests {
 
         let costs = model.calculate(&params);
 
-        // Brokerage: flat Rs 20 * 2 = 40
+        // Brokerage: flat Rs 20 per side
         assert!(
-            approx_eq(costs.total_brokerage, 40.0),
-            "Expected brokerage 40, got {}",
+            approx_eq(costs.total_brokerage, 20.0),
+            "Expected brokerage 20, got {}",
             costs.total_brokerage
         );
 
@@ -366,10 +366,10 @@ mod tests {
 
         let costs = model.calculate(&params);
 
-        // Brokerage: flat Rs 20 * 2 = 40
+        // Brokerage: flat Rs 20 per side
         assert!(
-            approx_eq(costs.total_brokerage, 40.0),
-            "Expected brokerage 40, got {}",
+            approx_eq(costs.total_brokerage, 20.0),
+            "Expected brokerage 20, got {}",
             costs.total_brokerage
         );
 
