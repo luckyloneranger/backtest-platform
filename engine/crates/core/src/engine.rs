@@ -197,6 +197,10 @@ impl BacktestEngine {
 
         // 7. Group finest bars by timestamp
         let grouped = group_bars_by_timestamp(finest_bars.clone());
+        debug_assert!(
+            grouped.windows(2).all(|w| w[0].0 <= w[1].0),
+            "bars are not sorted by timestamp — group_bars_by_timestamp requires sorted input"
+        );
         let total_bars = grouped.len() as i32;
 
         // 8. Process each timestamp group
@@ -330,25 +334,30 @@ impl BacktestEngine {
             // f. Get strategy signals
             let signals = strategy.on_bar(&snapshot).await?;
 
-            // g. Submit new orders (with margin check)
+            // g. Submit new orders (with margin check for buys only)
             for signal in signals {
                 if signal.action != Action::Hold {
-                    if let Some(max_margin) = config.margin_available {
-                        let trade_value =
-                            signal.quantity as f64 * finest_bar_group[0].close;
-                        let current_exposure = portfolio.equity() - portfolio.cash();
-                        if current_exposure + trade_value > max_margin {
-                            current_rejections.push(OrderRejection {
-                                symbol: signal.symbol.clone(),
-                                side: if signal.action == Action::Buy {
-                                    Side::Buy
-                                } else {
-                                    Side::Sell
-                                },
-                                quantity: signal.quantity,
-                                reason: "INSUFFICIENT_MARGIN".into(),
-                            });
-                            continue;
+                    // Bug 3 fix: margin check only applies to Buy orders.
+                    // Sells reduce exposure and should never be margin-blocked.
+                    if signal.action == Action::Buy {
+                        if let Some(max_margin) = config.margin_available {
+                            // Bug 4 fix: use the correct symbol's price, not the first bar's price
+                            let price = finest_bar_group
+                                .iter()
+                                .find(|b| b.symbol == signal.symbol)
+                                .map(|b| b.close)
+                                .unwrap_or(finest_bar_group[0].close);
+                            let trade_value = signal.quantity as f64 * price;
+                            let current_exposure = portfolio.equity() - portfolio.cash();
+                            if current_exposure + trade_value > max_margin {
+                                current_rejections.push(OrderRejection {
+                                    symbol: signal.symbol.clone(),
+                                    side: Side::Buy,
+                                    quantity: signal.quantity,
+                                    reason: "INSUFFICIENT_MARGIN".into(),
+                                });
+                                continue;
+                            }
                         }
                     }
                     matcher.submit(Order::from_signal(&signal));

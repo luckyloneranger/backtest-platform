@@ -96,13 +96,36 @@ impl Order {
         }
     }
 
+    pub fn stop_loss_market_sell(symbol: &str, qty: i32, stop: f64) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            side: Side::Sell,
+            quantity: qty,
+            order_type: OrderType::SlM,
+            limit_price: 0.0,
+            stop_price: stop,
+            product_type: ProductType::Cnc,
+        }
+    }
+
+    pub fn stop_loss_market_buy(symbol: &str, qty: i32, stop: f64) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            side: Side::Buy,
+            quantity: qty,
+            order_type: OrderType::SlM,
+            limit_price: 0.0,
+            stop_price: stop,
+            product_type: ProductType::Cnc,
+        }
+    }
+
     /// Convert a `Signal` into an `Order`.
     pub fn from_signal(signal: &Signal) -> Self {
         let side = match signal.action {
             Action::Buy => Side::Buy,
             Action::Sell => Side::Sell,
-            Action::Hold => Side::Buy, // Hold signals shouldn't generate orders,
-                                       // but we default to Buy for safety.
+            Action::Hold => panic!("Hold signals should not be converted to orders"),
         };
         Self {
             symbol: signal.symbol.clone(),
@@ -338,10 +361,10 @@ impl OrderMatcher {
                     }
                 }
 
-                // ── Stop-loss market (SL-M): trigger like SL, fill at stop_price ─
+                // ── Stop-loss market (SL-M): trigger like SL, fill at market (bar.open + slippage) ─
                 (OrderType::SlM, Side::Sell) => {
                     if bar.low <= order.stop_price {
-                        let price = order.stop_price;
+                        let price = bar.open * (1.0 - self.slippage_pct);
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -365,7 +388,7 @@ impl OrderMatcher {
                 }
                 (OrderType::SlM, Side::Buy) => {
                     if bar.high >= order.stop_price {
-                        let price = order.stop_price;
+                        let price = bar.open * (1.0 + self.slippage_pct);
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -590,5 +613,82 @@ mod tests {
         let (fills, rejections) = matcher.process_bar(&bar);
         assert!(rejections.is_empty());
         assert_eq!(fills.len(), 1); // should fill normally
+    }
+
+    // ── SL-M market fill tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_slm_sell_fills_at_market_price() {
+        let slippage = 0.001; // 0.1%
+        let mut matcher = OrderMatcher::new(slippage);
+        // SL-M sell with stop at 2450
+        matcher.submit(Order::stop_loss_market_sell("RELIANCE", 10, 2450.0));
+
+        // Bar where low=2440 triggers (low <= stop_price), open=2470
+        let bar = make_bar("RELIANCE", 2470.0, 2480.0, 2440.0, 2460.0, 1_000);
+        let (fills, rejections) = matcher.process_bar(&bar);
+
+        assert!(rejections.is_empty());
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, Side::Sell);
+        // SL-M should fill at bar.open * (1 - slippage) = 2470 * 0.999 = 2467.53
+        let expected = 2470.0 * (1.0 - slippage);
+        assert!(
+            (fills[0].fill_price - expected).abs() < 1e-10,
+            "SL-M sell should fill at bar.open*(1-slippage)={}, got {}",
+            expected,
+            fills[0].fill_price,
+        );
+        // Must NOT fill at stop_price
+        assert!(
+            (fills[0].fill_price - 2450.0).abs() > 1.0,
+            "SL-M sell must not fill at stop_price"
+        );
+    }
+
+    #[test]
+    fn test_slm_buy_fills_at_market_price() {
+        let slippage = 0.001; // 0.1%
+        let mut matcher = OrderMatcher::new(slippage);
+        // SL-M buy with stop at 2550
+        matcher.submit(Order::stop_loss_market_buy("RELIANCE", 10, 2550.0));
+
+        // Bar where high=2560 triggers (high >= stop_price), open=2530
+        let bar = make_bar("RELIANCE", 2530.0, 2560.0, 2520.0, 2540.0, 1_000);
+        let (fills, rejections) = matcher.process_bar(&bar);
+
+        assert!(rejections.is_empty());
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, Side::Buy);
+        // SL-M should fill at bar.open * (1 + slippage) = 2530 * 1.001 = 2532.53
+        let expected = 2530.0 * (1.0 + slippage);
+        assert!(
+            (fills[0].fill_price - expected).abs() < 1e-10,
+            "SL-M buy should fill at bar.open*(1+slippage)={}, got {}",
+            expected,
+            fills[0].fill_price,
+        );
+        // Must NOT fill at stop_price
+        assert!(
+            (fills[0].fill_price - 2550.0).abs() > 1.0,
+            "SL-M buy must not fill at stop_price"
+        );
+    }
+
+    // ── Hold panic test ────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Hold signals should not be converted to orders")]
+    fn test_from_signal_panics_on_hold() {
+        let hold_signal = Signal {
+            action: Action::Hold,
+            symbol: "TEST".into(),
+            quantity: 10,
+            order_type: OrderType::Market,
+            limit_price: 0.0,
+            stop_price: 0.0,
+            product_type: ProductType::Cnc,
+        };
+        let _ = Order::from_signal(&hold_signal);
     }
 }
