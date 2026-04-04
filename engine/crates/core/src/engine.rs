@@ -7,7 +7,7 @@ use crate::config::BacktestConfig;
 use crate::costs::{TradeParams, ZerodhaCostModel};
 use crate::matching::{Fill, Order, OrderMatcher, OrderRejection, Side};
 use crate::portfolio::{ClosedTrade, EquityPoint, PortfolioManager};
-use crate::types::{Action, Bar, InstrumentType, Portfolio, Signal};
+use crate::types::{Action, Bar, InstrumentType, Portfolio, ProductType, Signal};
 
 // ── InstrumentData ─────────────────────────────────────────────────────────
 
@@ -208,9 +208,10 @@ impl BacktestEngine {
                 let (fills, rejects) = matcher.process_bar(bar);
                 for fill in &fills {
                     let trade_value = fill.quantity as f64 * fill.fill_price;
+                    let is_intraday = fill.product_type == ProductType::Mis;
                     let params = TradeParams {
                         instrument_type: InstrumentType::Equity, // default for now
-                        is_intraday: true,                       // default for now
+                        is_intraday,
                         buy_value: if fill.side == Side::Buy {
                             trade_value
                         } else {

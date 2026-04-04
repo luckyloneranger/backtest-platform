@@ -13,7 +13,7 @@ use backtest_proto::backtest::{
 
 use crate::engine::{InstrumentData, IntervalRequirement, MarketSnapshot, StrategyClient};
 use crate::matching::Side;
-use crate::types::{Action, OrderType, Signal};
+use crate::types::{Action, OrderType, ProductType, Signal};
 
 // ── GrpcStrategyClient ─────────────────────────────────────────────────────
 
@@ -271,6 +271,11 @@ impl StrategyClient for GrpcStrategyClient {
                     backtest_proto::backtest::signal::OrderType::Sl => OrderType::Sl,
                     backtest_proto::backtest::signal::OrderType::SlM => OrderType::SlM,
                 };
+                let product_type = match s.product_type() {
+                    backtest_proto::backtest::signal::ProductType::Cnc => ProductType::Cnc,
+                    backtest_proto::backtest::signal::ProductType::Mis => ProductType::Mis,
+                    backtest_proto::backtest::signal::ProductType::Nrml => ProductType::Nrml,
+                };
                 Signal {
                     action,
                     symbol: s.symbol,
@@ -278,6 +283,7 @@ impl StrategyClient for GrpcStrategyClient {
                     order_type,
                     limit_price: s.limit_price,
                     stop_price: s.stop_price,
+                    product_type,
                 }
             })
             .collect();
