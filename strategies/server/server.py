@@ -19,9 +19,9 @@ from strategies.base import (
 # ------------------------------------------------------------------
 # Import strategy modules here so that the @register decorators run.
 # ------------------------------------------------------------------
-import strategies.examples.sma_crossover  # noqa: F401
-import strategies.examples.rsi_daily_trend  # noqa: F401
-import strategies.examples.donchian_breakout  # noqa: F401
+import strategies.deterministic.sma_crossover  # noqa: F401
+import strategies.deterministic.rsi_daily_trend  # noqa: F401
+import strategies.deterministic.donchian_breakout  # noqa: F401
 
 
 class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):

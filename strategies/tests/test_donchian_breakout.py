@@ -3,7 +3,7 @@
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo,
 )
-from strategies.examples.donchian_breakout import DonchianBreakout, compute_atr
+from strategies.deterministic.donchian_breakout import DonchianBreakout, compute_atr
 
 
 def make_snapshot(

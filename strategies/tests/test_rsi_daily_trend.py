@@ -3,7 +3,7 @@
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo, Signal,
 )
-from strategies.examples.rsi_daily_trend import RsiDailyTrend, compute_rsi, compute_ema
+from strategies.deterministic.rsi_daily_trend import RsiDailyTrend, compute_rsi, compute_ema
 
 
 # --- Helper ---

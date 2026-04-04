@@ -1,5 +1,5 @@
 from strategies.base import BarData, MarketSnapshot, Portfolio, Signal, SessionContext, InstrumentInfo
-from strategies.examples.sma_crossover import SmaCrossover
+from strategies.deterministic.sma_crossover import SmaCrossover
 
 
 def make_snapshot(ts: int, close: float, symbol: str = "TEST") -> MarketSnapshot:
