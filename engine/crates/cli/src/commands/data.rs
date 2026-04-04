@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate};
 use clap::Subcommand;
 use rand::Rng;
 
@@ -270,6 +270,8 @@ fn handle_generate_test_data(
     let mut rng = rand::thread_rng();
     let mut prev_close = start_price;
 
+    let ist = FixedOffset::east_opt(19800).unwrap(); // IST = UTC+5:30
+
     match interval_enum {
         Interval::Day => {
             let mut current_date = from_date;
@@ -277,7 +279,8 @@ fn handle_generate_test_data(
                 let timestamp_ms = current_date
                     .and_hms_opt(0, 0, 0)
                     .unwrap()
-                    .and_utc()
+                    .and_local_timezone(ist)
+                    .unwrap()
                     .timestamp_millis();
 
                 let bar = generate_bar(&mut rng, symbol, timestamp_ms, prev_close);
@@ -310,7 +313,8 @@ fn handle_generate_test_data(
                     let timestamp_ms = current_date
                         .and_hms_opt(hour, minute, 0)
                         .unwrap()
-                        .and_utc()
+                        .and_local_timezone(ist)
+                        .unwrap()
                         .timestamp_millis();
 
                     let bar = generate_bar(&mut rng, symbol, timestamp_ms, prev_close);

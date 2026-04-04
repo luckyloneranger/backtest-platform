@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,9 +54,34 @@ impl CandleStore {
         ]))
     }
 
-    /// Write bars to a Parquet file. Creates directories as needed.
-    /// Overwrites any existing file at the target path.
+    /// Write bars to a Parquet file, merging with any existing data.
+    /// New bars override existing bars on timestamp collision.
+    /// Creates directories as needed.
     pub fn write(
+        &self,
+        exchange: &str,
+        symbol: &str,
+        interval: Interval,
+        bars: &[Bar],
+    ) -> Result<()> {
+        // Read existing bars (empty vec if file doesn't exist)
+        let existing = self.read(exchange, symbol, interval, None, None).unwrap_or_default();
+
+        // Merge: existing first, then new bars (new override on collision)
+        let mut merged: BTreeMap<i64, Bar> = BTreeMap::new();
+        for bar in existing {
+            merged.insert(bar.timestamp_ms, bar);
+        }
+        for bar in bars {
+            merged.insert(bar.timestamp_ms, bar.clone());
+        }
+
+        let sorted_bars: Vec<Bar> = merged.into_values().collect();
+        self.write_internal(exchange, symbol, interval, &sorted_bars)
+    }
+
+    /// Internal write that directly writes bars to a Parquet file, truncating any existing file.
+    fn write_internal(
         &self,
         exchange: &str,
         symbol: &str,
@@ -300,5 +326,73 @@ mod tests {
             .expect("read should succeed even if file doesn't exist");
 
         assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn test_write_merges_not_overwrites() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let store = CandleStore::new(tmp.path());
+
+        // First write: bars at ts=1000 and ts=2000
+        let batch1 = vec![
+            make_bar(1_000, "RELIANCE", 2450.0, 2465.0, 100_000),
+            make_bar(2_000, "RELIANCE", 2465.0, 2480.0, 120_000),
+        ];
+        store
+            .write("NSE", "RELIANCE", Interval::Day, &batch1)
+            .expect("first write failed");
+
+        // Second write: bars at ts=3000 and ts=4000
+        let batch2 = vec![
+            make_bar(3_000, "RELIANCE", 2480.0, 2495.0, 130_000),
+            make_bar(4_000, "RELIANCE", 2495.0, 2510.0, 140_000),
+        ];
+        store
+            .write("NSE", "RELIANCE", Interval::Day, &batch2)
+            .expect("second write failed");
+
+        // Read all — should have all 4 bars
+        let all_bars = store
+            .read("NSE", "RELIANCE", Interval::Day, None, None)
+            .expect("read failed");
+
+        assert_eq!(all_bars.len(), 4);
+        assert_eq!(all_bars[0].timestamp_ms, 1_000);
+        assert_eq!(all_bars[1].timestamp_ms, 2_000);
+        assert_eq!(all_bars[2].timestamp_ms, 3_000);
+        assert_eq!(all_bars[3].timestamp_ms, 4_000);
+
+        // Verify data integrity of merged bars
+        assert!((all_bars[0].open - 2450.0).abs() < f64::EPSILON);
+        assert!((all_bars[2].open - 2480.0).abs() < f64::EPSILON);
+        assert_eq!(all_bars[3].volume, 140_000);
+    }
+
+    #[test]
+    fn test_write_merge_overrides_on_collision() {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let store = CandleStore::new(tmp.path());
+
+        // First write: bar at ts=1000
+        let batch1 = vec![make_bar(1_000, "INFY", 1400.0, 1410.0, 50_000)];
+        store
+            .write("NSE", "INFY", Interval::Minute, &batch1)
+            .expect("first write failed");
+
+        // Second write: bar at same ts=1000 with different data
+        let batch2 = vec![make_bar(1_000, "INFY", 1500.0, 1520.0, 80_000)];
+        store
+            .write("NSE", "INFY", Interval::Minute, &batch2)
+            .expect("second write failed");
+
+        // Read — should have 1 bar with the new data
+        let bars = store
+            .read("NSE", "INFY", Interval::Minute, None, None)
+            .expect("read failed");
+
+        assert_eq!(bars.len(), 1);
+        assert!((bars[0].open - 1500.0).abs() < f64::EPSILON);
+        assert!((bars[0].close - 1520.0).abs() < f64::EPSILON);
+        assert_eq!(bars[0].volume, 80_000);
     }
 }
