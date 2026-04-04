@@ -1,80 +1,69 @@
-"""RSI + Daily EMA Trend strategy.
+"""RSI Mean Reversion with Trend Filter + Pyramiding strategy.
 
 Multi-timeframe strategy that uses:
-- 15-minute RSI for entry/exit signals
+- 15-minute RSI for entry/exit signals (mean reversion)
 - Daily EMA for trend direction (regime filter)
+- Daily ATR for trailing stop calculation
 
-Rules:
-- Only BUY when daily EMA trend is UP and 15-min RSI drops below oversold level
-- Only SELL when 15-min RSI rises above overbought level, or daily trend reverses
-- Position sizing: allocate a configurable % of available capital per trade
+Entry (scaled pyramid):
+- Level 1: RSI < 40 AND daily trend up -> buy 1/3 of target position
+- Level 2: RSI < 30 AND already at Level 1 -> buy another 1/3
+- Level 3: RSI < 20 AND already at Level 1+2 -> buy final 1/3
+- Target position = risk_pct * portfolio.cash / price
 
-Config params:
-- rsi_period: RSI lookback period (default 14)
-- rsi_oversold: RSI level to trigger buy (default 30)
-- rsi_overbought: RSI level to trigger sell (default 70)
-- ema_period: Daily EMA period for trend (default 20)
-- risk_pct: fraction of available capital to allocate per trade (default 0.2 = 20%)
+Trend filter:
+- Trend UP = daily close > EMA AND EMA is rising (current EMA > EMA from 5 bars ago)
+
+Multiple exits:
+- Partial exit: sell 1/2 when RSI > rsi_partial_exit (default 60)
+- Full exit: RSI > rsi_full_exit (70) OR trend reversal OR trailing stop OR max loss
+- Trailing stop: avg_entry_price - atr_stop_multiplier * daily_ATR
+- Max loss stop: avg_entry_price * (1 - max_loss_pct)
+- Time stop: exit after max_hold_bars if gain < 0.5%
+
+Config defaults:
+- rsi_period=14, ema_period=20
+- rsi_entry_1=40, rsi_entry_2=30, rsi_entry_3=20
+- rsi_partial_exit=60, rsi_full_exit=70
+- risk_pct=0.3, atr_period=14, atr_stop_multiplier=2.0
+- max_loss_pct=0.03, max_hold_bars=20
 """
 
 from collections import deque
+from dataclasses import dataclass, field
 
 from server.registry import register
 from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal
+from strategies.indicators import compute_rsi, compute_ema, compute_atr
 
 
-def compute_rsi(prices: list[float], period: int) -> float | None:
-    """Compute RSI using simple moving average of gains/losses (Cutler's RSI).
-
-    Note: This is NOT Wilder's smoothed RSI used by most charting platforms.
-    Values will differ from TradingView/Bloomberg RSI, especially for short periods.
-
-    Returns None if not enough data.
-    """
-    if len(prices) < period + 1:
-        return None
-
-    gains = []
-    losses = []
-    for i in range(-period, 0):
-        change = prices[i] - prices[i - 1]
-        if change > 0:
-            gains.append(change)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(abs(change))
-
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def compute_ema(prices: list[float], period: int) -> float | None:
-    """Compute EMA from a list of prices. Returns None if not enough data."""
-    if len(prices) < period:
-        return None
-
-    multiplier = 2.0 / (period + 1)
-    ema = sum(prices[:period]) / period  # seed with SMA
-
-    for price in prices[period:]:
-        ema = (price - ema) * multiplier + ema
-
-    return ema
+@dataclass
+class SymbolState:
+    """Per-symbol tracking state for the pyramid strategy."""
+    pyramid_level: int = 0
+    avg_entry_price: float = 0.0
+    total_qty: int = 0
+    entry_bar: int = 0
+    partial_taken: bool = False
+    trailing_stop: float = 0.0
+    prices_15m: deque = field(default_factory=lambda: deque(maxlen=110))
+    prices_daily: deque = field(default_factory=lambda: deque(maxlen=60))
+    daily_highs: deque = field(default_factory=lambda: deque(maxlen=60))
+    daily_lows: deque = field(default_factory=lambda: deque(maxlen=60))
+    daily_closes: deque = field(default_factory=lambda: deque(maxlen=60))
+    ema_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    prev_rsi: float | None = None
+    bar_count: int = 0
+    cached_trend_up: bool = False
 
 
 @register("rsi_daily_trend")
 class RsiDailyTrend(Strategy):
-    """Multi-timeframe RSI + Daily EMA Trend strategy.
+    """Mean Reversion with Trend Filter + Pyramiding.
 
-    Uses 15-minute RSI for timing entries/exits and daily EMA for trend
-    direction. Only takes long positions when the daily trend is bullish.
+    Uses 15-minute RSI for timing pyramid entries/exits and daily EMA for
+    trend direction. Supports scaled entries, partial exits, trailing stops,
+    max-loss stops, and time-based exits.
     """
 
     def required_data(self) -> list[dict]:
@@ -84,114 +73,253 @@ class RsiDailyTrend(Strategy):
         ]
 
     def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
+        # RSI parameters
         self.rsi_period = config.get("rsi_period", 14)
-        self.rsi_oversold = config.get("rsi_oversold", 30)
-        self.rsi_overbought = config.get("rsi_overbought", 70)
+        self.rsi_entry_1 = config.get("rsi_entry_1", 40)
+        self.rsi_entry_2 = config.get("rsi_entry_2", 30)
+        self.rsi_entry_3 = config.get("rsi_entry_3", 20)
+        self.rsi_partial_exit = config.get("rsi_partial_exit", 60)
+        self.rsi_full_exit = config.get("rsi_full_exit", 70)
+
+        # EMA / trend parameters
         self.ema_period = config.get("ema_period", 20)
-        self.risk_pct = config.get("risk_pct", 0.2)  # 20% of capital per trade
+
+        # Position sizing
+        self.risk_pct = config.get("risk_pct", 0.3)
+
+        # Stop parameters
+        self.atr_period = config.get("atr_period", 14)
+        self.atr_stop_multiplier = config.get("atr_stop_multiplier", 2.0)
+        self.max_loss_pct = config.get("max_loss_pct", 0.03)
+        self.max_hold_bars = config.get("max_hold_bars", 20)
+
         self.instruments = instruments
 
         # Per-symbol state
-        self.prices_15m: dict[str, deque[float]] = {}
-        self.prices_daily: dict[str, deque[float]] = {}
-        self.in_position: dict[str, bool] = {}
-        self.prev_rsi: dict[str, float | None] = {}
+        self.states: dict[str, SymbolState] = {}
+
+    def _get_state(self, symbol: str) -> SymbolState:
+        """Get or create state for a symbol."""
+        if symbol not in self.states:
+            self.states[symbol] = SymbolState()
+        return self.states[symbol]
+
+    def _held_qty(self, symbol: str, snapshot: MarketSnapshot) -> int:
+        """Get quantity currently held in portfolio for a symbol."""
+        for pos in snapshot.portfolio.positions:
+            if pos.symbol == symbol and pos.quantity > 0:
+                return pos.quantity
+        return 0
+
+    def _update_trend(self, state: SymbolState) -> None:
+        """Recompute trend direction after a new daily bar. Updates cached_trend_up."""
+        if len(state.prices_daily) == 0:
+            state.cached_trend_up = False
+            return
+
+        ema = compute_ema(list(state.prices_daily), self.ema_period)
+        if ema is None:
+            state.cached_trend_up = False
+            return
+
+        # Store EMA in history for slope detection (once per daily bar)
+        state.ema_history.append(ema)
+
+        # Close must be above EMA
+        if state.prices_daily[-1] <= ema:
+            state.cached_trend_up = False
+            return
+
+        # EMA must be rising: current > value from 5 bars ago
+        if len(state.ema_history) >= 6:
+            state.cached_trend_up = state.ema_history[-1] > state.ema_history[-6]
+        else:
+            # Not enough EMA history yet -- accept close > EMA alone
+            state.cached_trend_up = True
+
+    def _compute_trailing_stop(self, state: SymbolState) -> float:
+        """Compute trailing stop based on ATR."""
+        atr = compute_atr(
+            list(state.daily_highs),
+            list(state.daily_lows),
+            list(state.daily_closes),
+            self.atr_period,
+        )
+        if atr is None or state.avg_entry_price <= 0:
+            return 0.0
+
+        return state.avg_entry_price - self.atr_stop_multiplier * atr
+
+    def _reset_state(self, state: SymbolState) -> None:
+        """Reset position-related state after full exit."""
+        state.pyramid_level = 0
+        state.avg_entry_price = 0.0
+        state.total_qty = 0
+        state.entry_bar = 0
+        state.partial_taken = False
+        state.trailing_stop = 0.0
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
         signals = []
 
-        # Update daily prices when a new daily bar arrives
+        # 1. Update daily prices when a new daily bar arrives
         if "day" in snapshot.timeframes:
             for symbol, bar in snapshot.timeframes["day"].items():
-                if symbol not in self.prices_daily:
-                    self.prices_daily[symbol] = deque(maxlen=self.ema_period + 10)
-                self.prices_daily[symbol].append(bar.close)
+                state = self._get_state(symbol)
+                state.prices_daily.append(bar.close)
+                state.daily_highs.append(bar.high)
+                state.daily_lows.append(bar.low)
+                state.daily_closes.append(bar.close)
+                self._update_trend(state)
 
-        # Process 15-minute bars for RSI signals
+        # 2. Process 15-minute bars
         if "15minute" not in snapshot.timeframes:
             return signals
 
         for symbol, bar in snapshot.timeframes["15minute"].items():
-            # Reconcile in_position flag with portfolio on order rejection
-            if symbol in self.in_position and self.in_position[symbol]:
-                held = any(p.symbol == symbol and p.quantity > 0 for p in snapshot.portfolio.positions)
-                if not held:
-                    self.in_position[symbol] = False
+            state = self._get_state(symbol)
+            state.bar_count += 1
 
-            if symbol not in self.prices_15m:
-                self.prices_15m[symbol] = deque(maxlen=self.rsi_period + 10)
-                self.in_position[symbol] = False
-                self.prev_rsi[symbol] = None
+            # Reconcile position with portfolio
+            held = self._held_qty(symbol, snapshot)
+            if state.pyramid_level > 0 and held == 0:
+                self._reset_state(state)
 
-            self.prices_15m[symbol].append(bar.close)
+            # Sync total_qty with portfolio
+            if state.pyramid_level > 0:
+                state.total_qty = held
+
+            state.prices_15m.append(bar.close)
 
             # Compute RSI on 15-minute data
-            rsi = compute_rsi(list(self.prices_15m[symbol]), self.rsi_period)
+            rsi = compute_rsi(list(state.prices_15m), self.rsi_period)
             if rsi is None:
+                state.prev_rsi = rsi
                 continue
 
-            # Compute daily EMA for trend direction
-            daily_prices = list(self.prices_daily.get(symbol, []))
-            ema = compute_ema(daily_prices, self.ema_period)
-            daily_trend_up = (
-                ema is not None
-                and len(daily_prices) > 0
-                and daily_prices[-1] > ema
+            # Determine daily trend (cached from last daily bar update)
+            trend_up = state.cached_trend_up
+
+            # Compute ATR for trailing stop
+            atr = compute_atr(
+                list(state.daily_highs),
+                list(state.daily_lows),
+                list(state.daily_closes),
+                self.atr_period,
             )
 
-            # --- Entry: RSI crosses below oversold AND daily trend is up ---
-            prev = self.prev_rsi[symbol]
-            if (
-                not self.in_position[symbol]
-                and daily_trend_up
-                and prev is not None
-                and prev >= self.rsi_oversold
-                and rsi < self.rsi_oversold
-            ):
-                # Dynamic position sizing: allocate risk_pct of available cash
-                allocation = snapshot.portfolio.cash * self.risk_pct
-                qty = int(allocation / bar.close)
+            # --- Target position sizing ---
+            target_qty = int(self.risk_pct * snapshot.portfolio.cash / bar.close) if bar.close > 0 else 0
+            inst = self.instruments.get(symbol)
+            if inst and inst.lot_size > 1:
+                target_qty = (target_qty // inst.lot_size) * inst.lot_size
+            level_qty = max(target_qty // 3, 1) if target_qty > 0 else 0
 
-                # Round to lot size if instrument metadata available
-                inst = self.instruments.get(symbol)
-                if inst and inst.lot_size > 1:
-                    qty = (qty // inst.lot_size) * inst.lot_size
+            # --- Pyramid entries ---
+            if state.pyramid_level == 0 and rsi < self.rsi_entry_1 and trend_up and level_qty > 0:
+                signals.append(Signal(
+                    action="BUY", symbol=symbol, quantity=level_qty,
+                    product_type="MIS",
+                ))
+                state.avg_entry_price = bar.close
+                state.total_qty = level_qty
+                state.pyramid_level = 1
+                state.entry_bar = state.bar_count
+                state.partial_taken = False
+                # Initialize trailing stop
+                if atr is not None:
+                    state.trailing_stop = bar.close - self.atr_stop_multiplier * atr
 
-                if qty > 0:
-                    signals.append(Signal(
-                        action="BUY", symbol=symbol, quantity=qty,
-                        product_type="MIS",
-                    ))
-                    self.in_position[symbol] = True
+            elif state.pyramid_level == 1 and rsi < self.rsi_entry_2 and level_qty > 0:
+                signals.append(Signal(
+                    action="BUY", symbol=symbol, quantity=level_qty,
+                    product_type="MIS",
+                ))
+                # Update weighted average entry price
+                old_cost = state.avg_entry_price * state.total_qty
+                new_cost = bar.close * level_qty
+                state.total_qty += level_qty
+                state.avg_entry_price = (old_cost + new_cost) / state.total_qty
+                state.pyramid_level = 2
 
-            # --- Exit: RSI crosses above overbought OR daily trend reverses ---
-            elif self.in_position[symbol]:
-                should_exit = False
+            elif state.pyramid_level == 2 and rsi < self.rsi_entry_3 and level_qty > 0:
+                signals.append(Signal(
+                    action="BUY", symbol=symbol, quantity=level_qty,
+                    product_type="MIS",
+                ))
+                old_cost = state.avg_entry_price * state.total_qty
+                new_cost = bar.close * level_qty
+                state.total_qty += level_qty
+                state.avg_entry_price = (old_cost + new_cost) / state.total_qty
+                state.pyramid_level = 3
 
-                # RSI overbought exit
-                if prev is not None and prev <= self.rsi_overbought and rsi > self.rsi_overbought:
-                    should_exit = True
+            # --- Exits (only if in position) ---
+            if state.pyramid_level > 0:
+                current_qty = self._held_qty(symbol, snapshot)
+                if current_qty == 0:
+                    # Use state.total_qty as fallback (fills not yet reflected)
+                    current_qty = state.total_qty
 
-                # Daily trend reversal exit
-                if not daily_trend_up and ema is not None:
-                    should_exit = True
+                # Update trailing stop (ratchet upwards)
+                if atr is not None and state.avg_entry_price > 0:
+                    new_stop = bar.close - self.atr_stop_multiplier * atr
+                    if new_stop > state.trailing_stop:
+                        state.trailing_stop = new_stop
 
-                if should_exit:
-                    # Sell entire position
-                    held_qty = 0
-                    for pos in snapshot.portfolio.positions:
-                        if pos.symbol == symbol:
-                            held_qty = pos.quantity
-                            break
-
-                    if held_qty > 0:
+                # Check partial exit: RSI > partial threshold, not yet taken
+                if (
+                    not state.partial_taken
+                    and rsi > self.rsi_partial_exit
+                    and current_qty > 1
+                ):
+                    sell_qty = current_qty // 2
+                    if sell_qty > 0:
                         signals.append(Signal(
-                            action="SELL", symbol=symbol, quantity=held_qty,
+                            action="SELL", symbol=symbol, quantity=sell_qty,
                             product_type="MIS",
                         ))
-                    self.in_position[symbol] = False
+                        state.partial_taken = True
+                        state.total_qty -= sell_qty
 
-            self.prev_rsi[symbol] = rsi
+                # Check full exit conditions
+                else:
+                    should_full_exit = False
+
+                    # RSI overbought full exit
+                    if rsi > self.rsi_full_exit:
+                        should_full_exit = True
+
+                    # Trend reversal exit (only if we have daily data)
+                    if len(state.prices_daily) > 0 and not trend_up:
+                        ema = compute_ema(list(state.prices_daily), self.ema_period)
+                        if ema is not None:
+                            should_full_exit = True
+
+                    # Trailing stop exit
+                    if state.trailing_stop > 0 and bar.close <= state.trailing_stop:
+                        should_full_exit = True
+
+                    # Max loss stop
+                    if state.avg_entry_price > 0:
+                        max_loss_price = state.avg_entry_price * (1 - self.max_loss_pct)
+                        if bar.close <= max_loss_price:
+                            should_full_exit = True
+
+                    # Time stop: held too long with insufficient gain
+                    bars_held = state.bar_count - state.entry_bar
+                    if bars_held > self.max_hold_bars and state.avg_entry_price > 0:
+                        gain_pct = (bar.close - state.avg_entry_price) / state.avg_entry_price
+                        if gain_pct < 0.005:
+                            should_full_exit = True
+
+                    if should_full_exit and current_qty > 0:
+                        signals.append(Signal(
+                            action="SELL", symbol=symbol, quantity=current_qty,
+                            product_type="MIS",
+                        ))
+                        self._reset_state(state)
+
+            state.prev_rsi = rsi
 
         return signals
 
@@ -201,4 +329,8 @@ class RsiDailyTrend(Strategy):
             "rsi_period": self.rsi_period,
             "ema_period": self.ema_period,
             "risk_pct": self.risk_pct,
+            "atr_period": self.atr_period,
+            "atr_stop_multiplier": self.atr_stop_multiplier,
+            "max_loss_pct": self.max_loss_pct,
+            "max_hold_bars": self.max_hold_bars,
         }
