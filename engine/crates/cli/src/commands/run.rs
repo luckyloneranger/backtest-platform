@@ -62,6 +62,22 @@ pub struct RunArgs {
     /// Maximum fraction of bar volume that can be filled per order (0.0-1.0)
     #[arg(long, default_value = "1.0")]
     pub max_volume_pct: f64,
+
+    /// Kill switch: max drawdown fraction (e.g. 0.05 = 5%). Force-closes all positions when breached.
+    #[arg(long)]
+    pub max_drawdown: Option<f64>,
+
+    /// Max daily loss in absolute rupees. Rejects buys and closes MIS when breached.
+    #[arg(long)]
+    pub daily_loss_limit: Option<f64>,
+
+    /// Max position quantity per symbol. Orders are clamped/rejected to stay within limit.
+    #[arg(long)]
+    pub max_position_qty: Option<i32>,
+
+    /// Max portfolio exposure as fraction of capital (e.g. 0.8 = 80%). Rejects buys that exceed.
+    #[arg(long)]
+    pub max_exposure: Option<f64>,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -101,6 +117,10 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         margin_available: None,
         lookback_window: args.lookback,
         max_volume_pct: args.max_volume_pct,
+        max_drawdown_pct: args.max_drawdown,
+        daily_loss_limit: args.daily_loss_limit,
+        max_position_qty: args.max_position_qty,
+        max_exposure_pct: args.max_exposure,
     };
 
     // Connect to Python strategy server

@@ -900,9 +900,14 @@ mod tests {
                 margin_available: None,
                 lookback_window: 200,
                 max_volume_pct: 1.0,
+                max_drawdown_pct: None,
+                daily_loss_limit: None,
+                max_position_qty: None,
+                max_exposure_pct: None,
             },
             custom_metrics: serde_json::json!({}),
             benchmark_return_pct: None,
+            kill_reason: None,
         };
 
         let report = MetricsReport::compute(&result);

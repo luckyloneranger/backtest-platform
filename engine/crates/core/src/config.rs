@@ -24,6 +24,22 @@ pub struct BacktestConfig {
     /// Default 1.0 means no constraint.
     #[serde(default = "default_max_volume_pct")]
     pub max_volume_pct: f64,
+    /// Maximum portfolio drawdown (fraction, e.g. 0.05 = 5%) before kill switch triggers.
+    /// When breached, all positions are force-closed and trading stops.
+    #[serde(default)]
+    pub max_drawdown_pct: Option<f64>,
+    /// Maximum loss (absolute rupees) allowed per trading day.
+    /// When breached, MIS positions are force-closed and new buys are rejected.
+    #[serde(default)]
+    pub daily_loss_limit: Option<f64>,
+    /// Maximum position quantity allowed per symbol.
+    /// Orders are clamped or rejected to stay within this limit.
+    #[serde(default)]
+    pub max_position_qty: Option<i32>,
+    /// Maximum portfolio exposure as a fraction of initial capital (e.g. 0.8 = 80%).
+    /// Buy orders that would push exposure above this are rejected.
+    #[serde(default)]
+    pub max_exposure_pct: Option<f64>,
 }
 
 fn default_lookback() -> usize {
@@ -52,6 +68,10 @@ mod tests {
             margin_available: None,
             lookback_window: 200,
             max_volume_pct: 1.0,
+            max_drawdown_pct: None,
+            daily_loss_limit: None,
+            max_position_qty: None,
+            max_exposure_pct: None,
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -75,6 +95,10 @@ mod tests {
             margin_available: None,
             lookback_window: 200,
             max_volume_pct: 1.0,
+            max_drawdown_pct: None,
+            daily_loss_limit: None,
+            max_position_qty: None,
+            max_exposure_pct: None,
         };
 
         let json = serde_json::to_string(&config).expect("serialize");
