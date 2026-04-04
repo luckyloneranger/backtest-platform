@@ -14,6 +14,7 @@ from server.registry import get_strategy
 from strategies.base import (
     BarData, InstrumentInfo, Position, Portfolio, FillInfo,
     OrderRejection, TradeInfo, SessionContext, MarketSnapshot, Signal,
+    PendingOrder,
 )
 
 # ------------------------------------------------------------------
@@ -151,6 +152,13 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             for t in request.closed_trades
         ]
 
+        # Convert pending orders
+        pending_orders = [
+            PendingOrder(po.symbol, po.side, po.quantity, po.order_type,
+                         po.limit_price, po.stop_price)
+            for po in request.pending_orders
+        ]
+
         # Convert context — in proto3 message fields are always present,
         # so we always construct SessionContext from whatever is there.
         ctx = SessionContext(
@@ -173,13 +181,14 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             rejections=rejections,
             closed_trades=closed_trades,
             context=ctx,
+            pending_orders=pending_orders,
         )
 
         signals = self.strategy.on_bar(snapshot)
 
         proto_signals = []
         for s in signals:
-            action_map = {"HOLD": 0, "BUY": 1, "SELL": 2}
+            action_map = {"HOLD": 0, "BUY": 1, "SELL": 2, "CANCEL": 3}
             order_map = {"MARKET": 0, "LIMIT": 1, "SL": 2, "SL_M": 3}
             product_map = {"CNC": 0, "MIS": 1, "NRML": 2}
             proto_signals.append(strategy_pb2.Signal(

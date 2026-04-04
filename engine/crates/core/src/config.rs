@@ -20,10 +20,18 @@ pub struct BacktestConfig {
     /// Number of historical bars to keep per symbol for strategy lookback.
     #[serde(default = "default_lookback")]
     pub lookback_window: usize,
+    /// Maximum fraction of bar volume that can be filled per order (0.0–1.0).
+    /// Default 1.0 means no constraint.
+    #[serde(default = "default_max_volume_pct")]
+    pub max_volume_pct: f64,
 }
 
 fn default_lookback() -> usize {
     200
+}
+
+fn default_max_volume_pct() -> f64 {
+    1.0
 }
 
 #[cfg(test)]
@@ -43,6 +51,7 @@ mod tests {
             slippage_pct: 0.05,
             margin_available: None,
             lookback_window: 200,
+            max_volume_pct: 1.0,
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -65,6 +74,7 @@ mod tests {
             slippage_pct: 0.0,
             margin_available: None,
             lookback_window: 200,
+            max_volume_pct: 1.0,
         };
 
         let json = serde_json::to_string(&config).expect("serialize");

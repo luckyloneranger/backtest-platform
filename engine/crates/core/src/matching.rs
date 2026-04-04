@@ -126,6 +126,7 @@ impl Order {
             Action::Buy => Side::Buy,
             Action::Sell => Side::Sell,
             Action::Hold => panic!("Hold signals should not be converted to orders"),
+            Action::Cancel => panic!("Cancel signals should not be converted to orders"),
         };
         Self {
             symbol: signal.symbol.clone(),
@@ -171,21 +172,69 @@ pub struct OrderRejection {
     pub reason: String,
 }
 
+// ── PendingOrderInfo ──────────────────────────────────────────────────────
+
+/// Lightweight read-only view of a pending order, sent to strategies.
+#[derive(Debug, Clone)]
+pub struct PendingOrderInfo {
+    pub symbol: String,
+    pub side: Side,
+    pub quantity: i32,
+    pub order_type: OrderType,
+    pub limit_price: f64,
+    pub stop_price: f64,
+}
+
+impl PendingOrderInfo {
+    pub fn from_order(order: &Order) -> Self {
+        Self {
+            symbol: order.symbol.clone(),
+            side: order.side,
+            quantity: order.quantity,
+            order_type: order.order_type,
+            limit_price: order.limit_price,
+            stop_price: order.stop_price,
+        }
+    }
+}
+
 // ── OrderMatcher ────────────────────────────────────────────────────────────
 
 pub struct OrderMatcher {
     pending: Vec<Order>,
     slippage_pct: f64,
     circuit_limits: HashMap<String, CircuitLimits>,
+    max_volume_pct: f64,
 }
 
 impl OrderMatcher {
-    pub fn new(slippage_pct: f64) -> Self {
+    pub fn new(slippage_pct: f64, max_volume_pct: f64) -> Self {
         Self {
             pending: Vec::new(),
             slippage_pct,
             circuit_limits: HashMap::new(),
+            max_volume_pct,
         }
+    }
+
+    /// Remove and return all pending orders for the given symbol.
+    pub fn cancel_orders_for_symbol(&mut self, symbol: &str) -> Vec<Order> {
+        let mut cancelled = Vec::new();
+        let mut remaining = Vec::new();
+        for order in self.pending.drain(..) {
+            if order.symbol == symbol {
+                cancelled.push(order);
+            } else {
+                remaining.push(order);
+            }
+        }
+        self.pending = remaining;
+        cancelled
+    }
+
+    /// Read-only access to all pending orders.
+    pub fn pending_orders(&self) -> &[Order] {
+        &self.pending
     }
 
     /// Set circuit limits for a symbol. If set, fills outside these bounds are rejected.
@@ -264,10 +313,15 @@ impl OrderMatcher {
                     }
                 }
 
-                // ── Limit orders ────────────────────────────────────────────
+                // ── Limit orders (with gap handling) ──────────────────────────
                 (OrderType::Limit, Side::Buy) => {
                     if bar.low <= order.limit_price {
-                        let price = order.limit_price;
+                        // Gap: if bar opens at or below limit, fill at open (price improvement)
+                        let price = if bar.open <= order.limit_price {
+                            bar.open
+                        } else {
+                            order.limit_price
+                        };
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -292,7 +346,12 @@ impl OrderMatcher {
                 }
                 (OrderType::Limit, Side::Sell) => {
                     if bar.high >= order.limit_price {
-                        let price = order.limit_price;
+                        // Gap: if bar opens at or above limit, fill at open (price improvement)
+                        let price = if bar.open >= order.limit_price {
+                            bar.open
+                        } else {
+                            order.limit_price
+                        };
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -316,10 +375,15 @@ impl OrderMatcher {
                     }
                 }
 
-                // ── Stop-loss orders (SL): fill at stop_price ───────────────
+                // ── Stop-loss orders (SL): fill at stop_price with gap handling ──
                 (OrderType::Sl, Side::Sell) => {
                     if bar.low <= order.stop_price {
-                        let price = order.stop_price;
+                        // Gap: if bar opens at or below stop, fill at open with slippage
+                        let price = if bar.open <= order.stop_price {
+                            bar.open * (1.0 - self.slippage_pct)
+                        } else {
+                            order.stop_price
+                        };
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -344,7 +408,12 @@ impl OrderMatcher {
                 }
                 (OrderType::Sl, Side::Buy) => {
                     if bar.high >= order.stop_price {
-                        let price = order.stop_price;
+                        // Gap: if bar opens at or above stop, fill at open with slippage
+                        let price = if bar.open >= order.stop_price {
+                            bar.open * (1.0 + self.slippage_pct)
+                        } else {
+                            order.stop_price
+                        };
                         if self.within_circuit_limits(&order.symbol, price) {
                             fills.push(Fill {
                                 symbol: order.symbol,
@@ -423,6 +492,35 @@ impl OrderMatcher {
         }
 
         self.pending = remaining;
+
+        // Apply volume constraints: clamp fill quantity to max_volume_pct of bar volume.
+        // If clamped, create a remainder order that stays pending.
+        if self.max_volume_pct < 1.0 {
+            let max_qty = (bar.volume as f64 * self.max_volume_pct).max(1.0) as i32;
+            let mut clamped_fills = Vec::new();
+            for mut fill in fills {
+                if fill.quantity > max_qty {
+                    let remainder_qty = fill.quantity - max_qty;
+                    fill.quantity = max_qty;
+                    // Create remainder order that goes back to pending.
+                    // The original trigger condition was met, so remainder fills
+                    // at next bar open as a market order.
+                    let remainder = Order {
+                        symbol: fill.symbol.clone(),
+                        side: fill.side,
+                        quantity: remainder_qty,
+                        order_type: OrderType::Market,
+                        limit_price: 0.0,
+                        stop_price: 0.0,
+                        product_type: fill.product_type,
+                    };
+                    self.pending.push(remainder);
+                }
+                clamped_fills.push(fill);
+            }
+            fills = clamped_fills;
+        }
+
         (fills, rejections)
     }
 }
@@ -449,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_market_order_fills_at_next_open() {
-        let mut matcher = OrderMatcher::new(0.0); // no slippage
+        let mut matcher = OrderMatcher::new(0.0, 1.0); // no slippage
         matcher.submit(Order::market_buy("RELIANCE", 10));
 
         let bar = make_bar("RELIANCE", 2500.0, 2520.0, 2480.0, 2510.0, 1_000);
@@ -466,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_limit_buy_fills_when_low_touches() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.submit(Order::limit_buy("RELIANCE", 10, 2480.0));
 
         // Bar1: low=2490, does NOT touch limit_price=2480 -> no fill
@@ -486,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_limit_sell_fills_when_high_touches() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.submit(Order::limit_sell("RELIANCE", 10, 2550.0));
 
         let bar = make_bar("RELIANCE", 2500.0, 2560.0, 2490.0, 2540.0, 1_000);
@@ -500,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_stop_loss_triggers() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.submit(Order::stop_loss_sell("RELIANCE", 10, 2450.0));
 
         let bar = make_bar("RELIANCE", 2470.0, 2480.0, 2440.0, 2460.0, 1_000);
@@ -514,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_slippage_applied() {
-        let mut matcher = OrderMatcher::new(0.001); // 0.1% slippage
+        let mut matcher = OrderMatcher::new(0.001, 1.0); // 0.1% slippage
         matcher.submit(Order::market_buy("RELIANCE", 10));
 
         let bar = make_bar("RELIANCE", 2500.0, 2520.0, 2480.0, 2510.0, 1_000);
@@ -527,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_unfilled_orders_remain_pending() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.submit(Order::limit_buy("RELIANCE", 10, 2400.0));
 
         // Bar where low=2450, does not touch 2400
@@ -546,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_circuit_limit_rejects_market_order() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.set_circuit_limits(
             "TEST",
             CircuitLimits {
@@ -579,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_circuit_limit_allows_within_range() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.set_circuit_limits(
             "TEST",
             CircuitLimits {
@@ -606,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_no_circuit_limits_allows_all() {
-        let mut matcher = OrderMatcher::new(0.0);
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
         // No circuit limits set
         matcher.submit(Order::market_buy("TEST", 10));
         let bar = Bar {
@@ -629,7 +727,7 @@ mod tests {
     #[test]
     fn test_slm_sell_fills_at_market_price() {
         let slippage = 0.001; // 0.1%
-        let mut matcher = OrderMatcher::new(slippage);
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
         // SL-M sell with stop at 2450
         matcher.submit(Order::stop_loss_market_sell("RELIANCE", 10, 2450.0));
 
@@ -658,7 +756,7 @@ mod tests {
     #[test]
     fn test_slm_buy_fills_at_market_price() {
         let slippage = 0.001; // 0.1%
-        let mut matcher = OrderMatcher::new(slippage);
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
         // SL-M buy with stop at 2550
         matcher.submit(Order::stop_loss_market_buy("RELIANCE", 10, 2550.0));
 
@@ -699,5 +797,263 @@ mod tests {
             product_type: ProductType::Cnc,
         };
         let _ = Order::from_signal(&hold_signal);
+    }
+
+    // ── Cancel panic test ─────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Cancel signals should not be converted to orders")]
+    fn test_from_signal_panics_on_cancel() {
+        let cancel_signal = Signal {
+            action: Action::Cancel,
+            symbol: "TEST".into(),
+            quantity: 0,
+            order_type: OrderType::Market,
+            limit_price: 0.0,
+            stop_price: 0.0,
+            product_type: ProductType::Cnc,
+        };
+        let _ = Order::from_signal(&cancel_signal);
+    }
+
+    // ── Cancellation tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_cancel_removes_pending_orders() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("RELIANCE", 10, 2400.0));
+
+        assert_eq!(matcher.pending_orders().len(), 1);
+
+        let cancelled = matcher.cancel_orders_for_symbol("RELIANCE");
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].symbol, "RELIANCE");
+        assert!(matcher.pending_orders().is_empty());
+    }
+
+    #[test]
+    fn test_cancel_only_affects_target_symbol() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("RELIANCE", 10, 2400.0));
+        matcher.submit(Order::limit_buy("INFY", 5, 1400.0));
+
+        assert_eq!(matcher.pending_orders().len(), 2);
+
+        let cancelled = matcher.cancel_orders_for_symbol("RELIANCE");
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(matcher.pending_orders().len(), 1);
+        assert_eq!(matcher.pending_orders()[0].symbol, "INFY");
+    }
+
+    #[test]
+    fn test_pending_orders_visible() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("RELIANCE", 10, 2400.0));
+
+        let pending = matcher.pending_orders();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].symbol, "RELIANCE");
+        assert_eq!(pending[0].side, Side::Buy);
+        assert_eq!(pending[0].quantity, 10);
+    }
+
+    // ── Gap handling tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_limit_buy_gap_fills_at_open() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        // Limit buy at 100
+        matcher.submit(Order::limit_buy("TEST", 10, 100.0));
+
+        // Bar opens at 95 (gapped below limit)
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 95.0,
+            high: 98.0,
+            low: 93.0,
+            close: 97.0,
+            volume: 100_000,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 95.0).abs() < f64::EPSILON,
+            "limit buy gap should fill at open 95, got {}", fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_limit_sell_gap_fills_at_open() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        // Limit sell at 100
+        matcher.submit(Order::limit_sell("TEST", 10, 100.0));
+
+        // Bar opens at 105 (gapped above limit)
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 105.0,
+            high: 108.0,
+            low: 103.0,
+            close: 106.0,
+            volume: 100_000,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 105.0).abs() < f64::EPSILON,
+            "limit sell gap should fill at open 105, got {}", fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_sell_gap_fills_at_open() {
+        let slippage = 0.001;
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
+        // SL sell at 100
+        matcher.submit(Order::stop_loss_sell("TEST", 10, 100.0));
+
+        // Bar opens at 90 (gapped below stop)
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 90.0,
+            high: 92.0,
+            low: 88.0,
+            close: 91.0,
+            volume: 100_000,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        let expected = 90.0 * (1.0 - slippage);
+        assert!((fills[0].fill_price - expected).abs() < 1e-10,
+            "SL sell gap should fill at open*(1-slippage)={}, got {}", expected, fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_buy_gap_fills_at_open() {
+        let slippage = 0.001;
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
+        // SL buy at 100
+        matcher.submit(Order::stop_loss_buy("TEST", 10, 100.0));
+
+        // Bar opens at 110 (gapped above stop)
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 110.0,
+            high: 115.0,
+            low: 108.0,
+            close: 112.0,
+            volume: 100_000,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        let expected = 110.0 * (1.0 + slippage);
+        assert!((fills[0].fill_price - expected).abs() < 1e-10,
+            "SL buy gap should fill at open*(1+slippage)={}, got {}", expected, fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_limit_buy_no_gap_fills_at_limit() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        // Limit buy at 100
+        matcher.submit(Order::limit_buy("TEST", 10, 100.0));
+
+        // Bar opens at 102 (above limit), low touches 100 -> fills at limit price
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 102.0,
+            high: 105.0,
+            low: 99.0,
+            close: 103.0,
+            volume: 100_000,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 100.0).abs() < f64::EPSILON,
+            "limit buy no-gap should fill at limit 100, got {}", fills[0].fill_price);
+    }
+
+    // ── Volume constraint tests ───────────────────────────────────────
+
+    #[test]
+    fn test_volume_constraint_clamps_qty() {
+        // max_pct = 0.1 (10%), bar volume = 100, so max_qty = 10
+        let mut matcher = OrderMatcher::new(0.0, 0.1);
+        matcher.submit(Order::market_buy("TEST", 1000));
+
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 100.0,
+            high: 105.0,
+            low: 95.0,
+            close: 102.0,
+            volume: 100,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].quantity, 10,
+            "fill qty should be clamped to 10% of volume 100 = 10, got {}", fills[0].quantity);
+    }
+
+    #[test]
+    fn test_volume_remainder_stays_pending() {
+        let mut matcher = OrderMatcher::new(0.0, 0.1);
+        matcher.submit(Order::market_buy("TEST", 1000));
+
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 100.0,
+            high: 105.0,
+            low: 95.0,
+            close: 102.0,
+            volume: 100,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills[0].quantity, 10);
+        // Remainder (1000 - 10 = 990) should be in pending
+        let pending = matcher.pending_orders();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].quantity, 990);
+        assert_eq!(pending[0].symbol, "TEST");
+    }
+
+    #[test]
+    fn test_volume_no_constraint_default() {
+        // max_pct = 1.0 means no constraint
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::market_buy("TEST", 1000));
+
+        let bar = Bar {
+            timestamp_ms: 1_000,
+            symbol: "TEST".into(),
+            open: 100.0,
+            high: 105.0,
+            low: 95.0,
+            close: 102.0,
+            volume: 100,
+            oi: 0,
+        };
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].quantity, 1000,
+            "with max_pct=1.0, full order should fill regardless of volume");
+        assert!(matcher.pending_orders().is_empty());
     }
 }

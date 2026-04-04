@@ -6,6 +6,7 @@ use tonic::transport::Channel;
 use backtest_proto::backtest::{
     strategy_service_client::StrategyServiceClient, BarData, BarEvent, CompleteRequest,
     FillInfo, InitRequest, InstrumentInfo, OrderRejection as ProtoOrderRejection,
+    PendingOrderInfo as ProtoPendingOrderInfo,
     PortfolioState, PositionInfo, RequirementsRequest,
     SessionContext as ProtoSessionContext, TimeframeData, TimeframeHistory,
     TradeInfo,
@@ -241,6 +242,28 @@ impl StrategyClient for GrpcStrategyClient {
             lookback_window: snapshot.context.lookback_window,
         };
 
+        // Convert pending orders -> proto PendingOrderInfo
+        let proto_pending_orders: Vec<ProtoPendingOrderInfo> = snapshot
+            .pending_orders
+            .iter()
+            .map(|po| ProtoPendingOrderInfo {
+                symbol: po.symbol.clone(),
+                side: match po.side {
+                    Side::Buy => "BUY".into(),
+                    Side::Sell => "SELL".into(),
+                },
+                quantity: po.quantity,
+                order_type: match po.order_type {
+                    OrderType::Market => "MARKET".into(),
+                    OrderType::Limit => "LIMIT".into(),
+                    OrderType::Sl => "SL".into(),
+                    OrderType::SlM => "SL_M".into(),
+                },
+                limit_price: po.limit_price,
+                stop_price: po.stop_price,
+            })
+            .collect();
+
         // Build enriched BarEvent with multi-timeframe data
         let bar_event = BarEvent {
             timestamp_ms: snapshot.timestamp_ms,
@@ -252,6 +275,7 @@ impl StrategyClient for GrpcStrategyClient {
             rejections: proto_rejections,
             closed_trades: proto_trades,
             context: Some(proto_context),
+            pending_orders: proto_pending_orders,
         };
 
         let resp = client.on_bar(bar_event).await?.into_inner();
@@ -265,6 +289,7 @@ impl StrategyClient for GrpcStrategyClient {
                     backtest_proto::backtest::signal::Action::Hold => Action::Hold,
                     backtest_proto::backtest::signal::Action::Buy => Action::Buy,
                     backtest_proto::backtest::signal::Action::Sell => Action::Sell,
+                    backtest_proto::backtest::signal::Action::Cancel => Action::Cancel,
                 };
                 let order_type = match s.order_type() {
                     backtest_proto::backtest::signal::OrderType::Market => OrderType::Market,

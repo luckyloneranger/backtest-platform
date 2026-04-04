@@ -21,6 +21,7 @@ pub enum Action {
     Hold,
     Buy,
     Sell,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

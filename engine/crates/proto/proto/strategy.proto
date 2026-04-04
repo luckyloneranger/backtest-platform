@@ -50,6 +50,7 @@ message BarEvent {
   repeated OrderRejection rejections = 7;   // rejections from previous bar
   repeated TradeInfo closed_trades = 8;     // all closed trades so far
   SessionContext context = 9;
+  repeated PendingOrderInfo pending_orders = 10;  // currently pending orders
 }
 
 message BarData {
@@ -103,6 +104,15 @@ message OrderRejection {
   string reason = 4;
 }
 
+message PendingOrderInfo {
+  string symbol = 1;
+  string side = 2;
+  int32 quantity = 3;
+  string order_type = 4;
+  double limit_price = 5;
+  double stop_price = 6;
+}
+
 message TradeInfo {
   string symbol = 1;
   int32 quantity = 2;
@@ -150,6 +160,7 @@ message Signal {
     HOLD = 0;
     BUY = 1;
     SELL = 2;
+    CANCEL = 3;
   }
   enum OrderType {
     MARKET = 0;

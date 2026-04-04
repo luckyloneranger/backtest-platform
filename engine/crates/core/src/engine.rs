@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::config::BacktestConfig;
 use crate::costs::{TradeParams, ZerodhaCostModel};
-use crate::matching::{Fill, Order, OrderMatcher, OrderRejection, Side};
+use crate::matching::{Fill, Order, OrderMatcher, OrderRejection, PendingOrderInfo, Side};
 use crate::portfolio::{ClosedTrade, EquityPoint, PortfolioManager};
 use crate::types::{Action, Bar, InstrumentType, Portfolio, ProductType, Signal};
 
@@ -66,6 +66,7 @@ pub struct MarketSnapshot {
     pub rejections: Vec<OrderRejection>,
     pub closed_trades: Vec<ClosedTrade>,
     pub context: SessionContext,
+    pub pending_orders: Vec<PendingOrderInfo>,
 }
 
 // ── StrategyClient trait ────────────────────────────────────────────────────
@@ -147,7 +148,7 @@ impl BacktestEngine {
         // 2. Set up components
         let cost_model = ZerodhaCostModel;
         let mut portfolio = PortfolioManager::new(config.initial_capital);
-        let mut matcher = OrderMatcher::new(config.slippage_pct);
+        let mut matcher = OrderMatcher::new(config.slippage_pct, config.max_volume_pct);
 
         // Build instrument type lookup from provided instruments
         let instrument_type_map: HashMap<String, InstrumentType> = instruments
@@ -335,7 +336,14 @@ impl BacktestEngine {
                 .map(|(k, buf)| (k.clone(), buf.iter().cloned().collect()))
                 .collect();
 
-            // e. Build snapshot
+            // e. Build pending orders info for snapshot
+            let pending_order_infos: Vec<PendingOrderInfo> = matcher
+                .pending_orders()
+                .iter()
+                .map(PendingOrderInfo::from_order)
+                .collect();
+
+            // f. Build snapshot
             let snapshot = MarketSnapshot {
                 timestamp_ms: *timestamp,
                 timeframes,
@@ -354,6 +362,7 @@ impl BacktestEngine {
                     intervals: interval_names.clone(),
                     lookback_window: config.lookback_window as i32,
                 },
+                pending_orders: pending_order_infos,
             };
 
             // f. Get strategy signals
@@ -361,7 +370,9 @@ impl BacktestEngine {
 
             // g. Submit new orders (with margin check for buys only)
             for signal in signals {
-                if signal.action != Action::Hold {
+                if signal.action == Action::Cancel {
+                    matcher.cancel_orders_for_symbol(&signal.symbol);
+                } else if signal.action != Action::Hold {
                     // Bug 3 fix: margin check only applies to Buy orders.
                     // Sells reduce exposure and should never be margin-blocked.
                     if signal.action == Action::Buy {
@@ -568,6 +579,7 @@ mod tests {
             slippage_pct: 0.0,
             margin_available: None,
             lookback_window: 200,
+            max_volume_pct: 1.0,
         };
 
         let mut bars_by_interval = HashMap::new();
@@ -649,6 +661,7 @@ mod tests {
                 slippage_pct: 0.0,
                 margin_available: None,
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),
@@ -732,6 +745,7 @@ mod tests {
                 slippage_pct: 0.0,
                 margin_available: Some(50_000.0),
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),
@@ -835,6 +849,7 @@ mod tests {
                 // Set margin to allow the buy (100 * 101 = 10100) but would block another buy
                 margin_available: Some(11_000.0),
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),
@@ -947,6 +962,7 @@ mod tests {
                 // Margin 1000: 10 * 500 = 5000 should be blocked
                 margin_available: Some(1_000.0),
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),
@@ -1073,6 +1089,7 @@ mod tests {
                 slippage_pct: 0.0,
                 margin_available: None,
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),
@@ -1178,6 +1195,7 @@ mod tests {
                 slippage_pct: 0.0,
                 margin_available: None,
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             bars_by_interval,
             HashMap::new(),

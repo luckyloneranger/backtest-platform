@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -74,6 +74,16 @@ class TradeInfo:
 
 
 @dataclass
+class PendingOrder:
+    symbol: str
+    side: str                # "BUY", "SELL"
+    quantity: int
+    order_type: str          # "MARKET", "LIMIT", "SL", "SL_M"
+    limit_price: float
+    stop_price: float
+
+
+@dataclass
 class SessionContext:
     initial_capital: float
     bar_number: int
@@ -86,7 +96,7 @@ class SessionContext:
 
 @dataclass
 class Signal:
-    action: str              # "HOLD", "BUY", "SELL"
+    action: str              # "HOLD", "BUY", "SELL", "CANCEL"
     symbol: str
     quantity: int
     order_type: str = "MARKET"    # "MARKET", "LIMIT", "SL", "SL_M"
@@ -107,6 +117,7 @@ class MarketSnapshot:
     rejections: list[OrderRejection]
     closed_trades: list[TradeInfo]
     context: SessionContext
+    pending_orders: list[PendingOrder] = field(default_factory=list)
 
 
 class Strategy(ABC):

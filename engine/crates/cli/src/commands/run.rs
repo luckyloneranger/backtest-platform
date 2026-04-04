@@ -58,6 +58,10 @@ pub struct RunArgs {
     /// Exchange (NSE, BSE, MCX)
     #[arg(long, default_value = "NSE")]
     pub exchange: String,
+
+    /// Maximum fraction of bar volume that can be filled per order (0.0-1.0)
+    #[arg(long, default_value = "1.0")]
+    pub max_volume_pct: f64,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -96,6 +100,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         slippage_pct: args.slippage,
         margin_available: None,
         lookback_window: args.lookback,
+        max_volume_pct: args.max_volume_pct,
     };
 
     // Connect to Python strategy server

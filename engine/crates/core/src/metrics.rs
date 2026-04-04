@@ -899,6 +899,7 @@ mod tests {
                 slippage_pct: 0.0,
                 margin_available: None,
                 lookback_window: 200,
+                max_volume_pct: 1.0,
             },
             custom_metrics: serde_json::json!({}),
             benchmark_return_pct: None,
