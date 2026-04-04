@@ -1,0 +1,15 @@
+[project]
+name = "backtest-strategies"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.68",
+    "grpcio-tools>=1.68",
+    "protobuf>=5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["server*", "strategies*"]
