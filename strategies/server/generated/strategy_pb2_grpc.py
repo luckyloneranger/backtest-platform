@@ -49,6 +49,11 @@ class StrategyServiceStub(object):
                 request_serializer=strategy__pb2.CompleteRequest.SerializeToString,
                 response_deserializer=strategy__pb2.CompleteResponse.FromString,
                 _registered_method=True)
+        self.GetRequirements = channel.unary_unary(
+                '/backtest.StrategyService/GetRequirements',
+                request_serializer=strategy__pb2.RequirementsRequest.SerializeToString,
+                response_deserializer=strategy__pb2.DataRequirements.FromString,
+                _registered_method=True)
 
 
 class StrategyServiceServicer(object):
@@ -72,6 +77,12 @@ class StrategyServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetRequirements(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StrategyServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +100,11 @@ def add_StrategyServiceServicer_to_server(servicer, server):
                     servicer.OnComplete,
                     request_deserializer=strategy__pb2.CompleteRequest.FromString,
                     response_serializer=strategy__pb2.CompleteResponse.SerializeToString,
+            ),
+            'GetRequirements': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetRequirements,
+                    request_deserializer=strategy__pb2.RequirementsRequest.FromString,
+                    response_serializer=strategy__pb2.DataRequirements.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +188,33 @@ class StrategyService(object):
             '/backtest.StrategyService/OnComplete',
             strategy__pb2.CompleteRequest.SerializeToString,
             strategy__pb2.CompleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetRequirements(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/backtest.StrategyService/GetRequirements',
+            strategy__pb2.RequirementsRequest.SerializeToString,
+            strategy__pb2.DataRequirements.FromString,
             options,
             channel_credentials,
             insecure,

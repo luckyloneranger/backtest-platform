@@ -6,14 +6,14 @@ def make_snapshot(ts: int, close: float, symbol: str = "TEST") -> MarketSnapshot
     bar = BarData(symbol, close, close, close, close, 1000, 0)
     return MarketSnapshot(
         timestamp_ms=ts,
-        bars={symbol: bar},
+        timeframes={"day": {symbol: bar}},
         history={},
         portfolio=Portfolio(cash=100_000.0, equity=100_000.0, positions=[]),
         instruments={},
         fills=[],
         rejections=[],
         closed_trades=[],
-        context=SessionContext(100_000.0, ts, 100, "2024-01-01", "2024-12-31", "day", 200),
+        context=SessionContext(100_000.0, ts, 100, "2024-01-01", "2024-12-31", ["day"], 200),
     )
 
 

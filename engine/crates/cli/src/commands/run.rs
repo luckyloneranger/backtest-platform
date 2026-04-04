@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
 use backtest_core::config::BacktestConfig;
-use backtest_core::engine::BacktestEngine;
+use backtest_core::engine::{BacktestEngine, IntervalRequirement, StrategyClient};
 use backtest_core::grpc_client::GrpcStrategyClient;
 use backtest_core::reporter::Reporter;
 use backtest_core::types::Interval;
@@ -77,29 +78,6 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         lookback_window: args.lookback,
     };
 
-    // Read candles from CandleStore at ./data/
-    let store = CandleStore::new(Path::new("./data"));
-    let mut all_bars = Vec::new();
-
-    for symbol in &args.symbols {
-        let bars = store.read("NSE", symbol, interval, None, None)?;
-        if bars.is_empty() {
-            eprintln!(
-                "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
-                symbol,
-                args.interval,
-            );
-        }
-        all_bars.extend(bars);
-    }
-
-    // Sort all bars by timestamp for proper event ordering
-    all_bars.sort_by_key(|b| b.timestamp_ms);
-
-    if all_bars.is_empty() {
-        anyhow::bail!("no candle data found for any symbol. Cannot run backtest.");
-    }
-
     // Connect to Python strategy server
     let addr = format!("http://[::1]:{}", args.strategy_port);
     let strategy = GrpcStrategyClient::connect(&addr)
@@ -111,6 +89,49 @@ pub async fn handle(args: RunArgs) -> Result<()> {
             )
         })?;
 
+    // Query the strategy for its data requirements
+    let config_json = serde_json::to_string(&config.strategy_params)?;
+    let requirements = strategy
+        .get_requirements(&args.strategy, &config_json)
+        .await
+        .unwrap_or_else(|_| {
+            // Fallback: use the CLI interval with default lookback
+            vec![IntervalRequirement {
+                interval: args.interval.clone(),
+                lookback: args.lookback,
+            }]
+        });
+
+    // Read candles from CandleStore at ./data/ for each required interval
+    let store = CandleStore::new(Path::new("./data"));
+    let mut bars_by_interval: HashMap<String, Vec<backtest_core::types::Bar>> = HashMap::new();
+
+    for req in &requirements {
+        let req_interval = parse_interval(&req.interval)?;
+        let mut interval_bars = Vec::new();
+
+        for symbol in &args.symbols {
+            let bars = store.read("NSE", symbol, req_interval, None, None)?;
+            if bars.is_empty() {
+                eprintln!(
+                    "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
+                    symbol,
+                    req.interval,
+                );
+            }
+            interval_bars.extend(bars);
+        }
+
+        // Sort bars by timestamp for proper event ordering
+        interval_bars.sort_by_key(|b| b.timestamp_ms);
+        bars_by_interval.insert(req.interval.clone(), interval_bars);
+    }
+
+    let any_data = bars_by_interval.values().any(|v| !v.is_empty());
+    if !any_data {
+        anyhow::bail!("no candle data found for any symbol/interval. Cannot run backtest.");
+    }
+
     // Run backtest
     println!(
         "Running backtest: strategy={}, symbols={}, {} to {}",
@@ -120,7 +141,8 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         args.to,
     );
 
-    let result = BacktestEngine::run(config, all_bars, &strategy, vec![]).await?;
+    let result =
+        BacktestEngine::run(config, bars_by_interval, &strategy, vec![], &requirements).await?;
 
     // Save results
     let reporter = Reporter::new(Path::new("./results"));

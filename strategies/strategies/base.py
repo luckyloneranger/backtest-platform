@@ -79,7 +79,7 @@ class SessionContext:
     total_bars: int
     start_date: str
     end_date: str
-    interval: str
+    intervals: list[str]
     lookback_window: int
 
 
@@ -97,8 +97,8 @@ class Signal:
 class MarketSnapshot:
     """Full market context sent to strategy per on_bar call."""
     timestamp_ms: int
-    bars: dict[str, BarData]
-    history: dict[str, list[BarData]]
+    timeframes: dict[str, dict[str, BarData]]          # interval -> symbol -> bar
+    history: dict[tuple[str, str], list[BarData]]       # (symbol, interval) -> bars
     portfolio: Portfolio
     instruments: dict[str, InstrumentInfo]
     fills: list[FillInfo]
@@ -108,6 +108,13 @@ class MarketSnapshot:
 
 
 class Strategy(ABC):
+    @abstractmethod
+    def required_data(self) -> list[dict]:
+        """Declare data requirements. Called before initialize().
+        Return: [{"interval": "minute", "lookback": 50}, {"interval": "day", "lookback": 200}]
+        """
+        pass
+
     @abstractmethod
     def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
         """Called once with strategy parameters and instrument metadata."""

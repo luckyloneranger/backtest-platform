@@ -5,6 +5,7 @@ service StrategyService {
   rpc Initialize(InitRequest) returns (InitResponse);
   rpc OnBar(BarEvent) returns (BarResponse);
   rpc OnComplete(CompleteRequest) returns (CompleteResponse);
+  rpc GetRequirements(RequirementsRequest) returns (DataRequirements);
 }
 
 // --- Initialize ---
@@ -21,12 +22,28 @@ message InitResponse {
   string error = 2;
 }
 
+// --- Requirements ---
+
+message RequirementsRequest {
+  string strategy_name = 1;
+  string config_json = 2;
+}
+
+message DataRequirements {
+  repeated IntervalRequirement intervals = 1;
+}
+
+message IntervalRequirement {
+  string interval = 1;     // "minute", "5minute", "day"
+  int32 lookback = 2;      // bars to keep in history for this interval
+}
+
 // --- Bar Event (enriched) ---
 
 message BarEvent {
   int64 timestamp_ms = 1;
-  repeated BarData bars = 2;                // all symbols at this timestamp
-  repeated SymbolHistory history = 3;       // lookback per symbol
+  repeated TimeframeData timeframes = 2;    // bars grouped by interval
+  repeated TimeframeHistory history = 3;    // lookback per (symbol, interval)
   PortfolioState portfolio = 4;
   repeated InstrumentInfo instruments = 5;  // instrument metadata
   repeated FillInfo fills = 6;              // fills from previous bar
@@ -45,9 +62,15 @@ message BarData {
   int64 oi = 7;
 }
 
-message SymbolHistory {
+message TimeframeData {
+  string interval = 1;          // "minute", "15minute", "day"
+  repeated BarData bars = 2;    // all symbols with a new bar at this interval
+}
+
+message TimeframeHistory {
   string symbol = 1;
-  repeated BarData bars = 2;
+  string interval = 2;
+  repeated BarData bars = 3;    // last N bars for this (symbol, interval)
 }
 
 message InstrumentInfo {
@@ -96,7 +119,7 @@ message SessionContext {
   int32 total_bars = 3;
   string start_date = 4;
   string end_date = 5;
-  string interval = 6;
+  repeated string intervals = 6;
   int32 lookback_window = 7;
 }
 
