@@ -744,6 +744,7 @@ mod tests {
                 interval: Interval::Minute,
                 strategy_params: serde_json::json!({}),
                 slippage_pct: 0.0,
+                margin_available: None,
             },
             custom_metrics: serde_json::json!({}),
         };

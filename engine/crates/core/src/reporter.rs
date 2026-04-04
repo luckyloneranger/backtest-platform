@@ -318,6 +318,7 @@ mod tests {
                 interval: Interval::Minute,
                 strategy_params: serde_json::json!({"fast": 10, "slow": 30}),
                 slippage_pct: 0.05,
+                margin_available: None,
             },
             custom_metrics: serde_json::json!({"custom_key": 42}),
         }
@@ -435,6 +436,7 @@ mod tests {
                 interval: Interval::Day,
                 strategy_params: serde_json::json!({}),
                 slippage_pct: 0.0,
+                margin_available: None,
             },
             custom_metrics: serde_json::json!({}),
         };

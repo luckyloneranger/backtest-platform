@@ -6,6 +6,29 @@ use serde::Deserialize;
 
 use backtest_core::types::{Bar, Exchange, Instrument, InstrumentType, Interval};
 
+// ── Margins API types ───────────────────────────────────────────────────────
+
+/// Margin data from Kite's /user/margins endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KiteMargins {
+    pub equity: KiteMarginSegment,
+    pub commodity: KiteMarginSegment,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KiteMarginSegment {
+    pub available: KiteMarginAvailable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KiteMarginAvailable {
+    pub cash: f64,
+    #[serde(default)]
+    pub collateral: f64,
+    #[serde(default)]
+    pub intraday_payin: f64,
+}
+
 // ── Quote API types ─────────────────────────────────────────────────────────
 
 /// Data returned by the Kite /quote endpoint for a single instrument.
@@ -184,6 +207,35 @@ impl KiteClient {
 
         let response: QuoteResponse =
             serde_json::from_str(&json_text).context("failed to parse quote JSON")?;
+
+        Ok(response.data)
+    }
+
+    /// Fetch account margin information.
+    pub async fn fetch_margins(&self) -> Result<KiteMargins> {
+        let url = format!("{}/user/margins", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("failed to send margins request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("margins endpoint returned HTTP {}: {}", status.as_u16(), body);
+        }
+
+        let json_text = resp.text().await.context("failed to read margins response")?;
+
+        #[derive(Deserialize)]
+        struct MarginsResponse {
+            data: KiteMargins,
+        }
+        let response: MarginsResponse =
+            serde_json::from_str(&json_text).context("failed to parse margins JSON")?;
 
         Ok(response.data)
     }

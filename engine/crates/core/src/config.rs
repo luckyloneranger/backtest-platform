@@ -13,6 +13,10 @@ pub struct BacktestConfig {
     pub interval: Interval,
     pub strategy_params: serde_json::Value,
     pub slippage_pct: f64,
+    /// If set, reject trades whose notional value would push total exposure
+    /// above this margin limit.
+    #[serde(default)]
+    pub margin_available: Option<f64>,
 }
 
 #[cfg(test)]
@@ -30,6 +34,7 @@ mod tests {
             interval: Interval::Day,
             strategy_params: serde_json::json!({"fast": 10, "slow": 30}),
             slippage_pct: 0.05,
+            margin_available: None,
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -50,6 +55,7 @@ mod tests {
             interval: Interval::Minute,
             strategy_params: serde_json::json!({}),
             slippage_pct: 0.0,
+            margin_available: None,
         };
 
         let json = serde_json::to_string(&config).expect("serialize");

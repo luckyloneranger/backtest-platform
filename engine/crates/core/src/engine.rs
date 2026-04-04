@@ -89,6 +89,14 @@ impl BacktestEngine {
             // d. Convert signals to orders and submit to matcher
             for signal in signals {
                 if signal.action != Action::Hold {
+                    // Optional margin check
+                    if let Some(max_margin) = config.margin_available {
+                        let trade_value = signal.quantity as f64 * bar.close;
+                        let current_exposure = portfolio.equity() - portfolio.cash();
+                        if current_exposure + trade_value > max_margin {
+                            continue; // skip this signal — would exceed margin
+                        }
+                    }
                     matcher.submit(Order::from_signal(&signal));
                 }
             }
@@ -180,6 +188,7 @@ mod tests {
             interval: Interval::Minute,
             strategy_params: serde_json::json!({}),
             slippage_pct: 0.0,
+            margin_available: None,
         };
 
         let result = BacktestEngine::run(config, bars, &client).await.unwrap();
@@ -235,6 +244,7 @@ mod tests {
                 interval: Interval::Day,
                 strategy_params: serde_json::json!({}),
                 slippage_pct: 0.0,
+                margin_available: None,
             },
             bars,
             &HoldStrategy,
@@ -244,5 +254,64 @@ mod tests {
 
         assert!(result.trades.is_empty());
         assert_eq!(result.final_equity, 1_000_000.0);
+    }
+
+    #[tokio::test]
+    async fn test_engine_margin_limit() {
+        // Strategy that tries to buy 1000 shares at ~100 each = 100,000 value
+        // But margin_available is only 50,000
+        struct BigBuyStrategy;
+
+        #[async_trait]
+        impl StrategyClient for BigBuyStrategy {
+            async fn initialize(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn on_bar(&self, bar: &Bar, _: &Portfolio) -> Result<Vec<Signal>> {
+                Ok(vec![Signal::market_buy(&bar.symbol, 1000)])
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let bars: Vec<Bar> = (0..5)
+            .map(|i| Bar {
+                timestamp_ms: i * 60000,
+                symbol: "TEST".into(),
+                open: 100.0,
+                high: 102.0,
+                low: 99.0,
+                close: 101.0,
+                volume: 1000,
+                oi: 0,
+            })
+            .collect();
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "big_buy".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: Some(50_000.0),
+            },
+            bars,
+            &BigBuyStrategy,
+        )
+        .await
+        .unwrap();
+
+        // With 50K margin, the 100K trade should be blocked
+        assert!(result.trades.is_empty());
     }
 }

@@ -69,6 +69,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         interval,
         strategy_params,
         slippage_pct: args.slippage,
+        margin_available: None,
     };
 
     // Read candles from CandleStore at ./data/
