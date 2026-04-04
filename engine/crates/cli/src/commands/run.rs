@@ -10,7 +10,7 @@ use backtest_core::engine::{BacktestEngine, InstrumentData, IntervalRequirement,
 use backtest_core::grpc_client::GrpcStrategyClient;
 use backtest_core::reporter::Reporter;
 use backtest_core::types::{Exchange, Interval};
-use backtest_data::candles::CandleStore;
+use backtest_data::candles::{adjust_for_corporate_actions, CandleStore};
 use backtest_data::instruments::InstrumentStore;
 
 #[derive(Parser)]
@@ -78,6 +78,10 @@ pub struct RunArgs {
     /// Max portfolio exposure as fraction of capital (e.g. 0.8 = 80%). Rejects buys that exceed.
     #[arg(long)]
     pub max_exposure: Option<f64>,
+
+    /// Comma-separated list of non-tradable reference symbols (e.g. NIFTY 50 index)
+    #[arg(long, value_delimiter = ',')]
+    pub reference_symbols: Vec<String>,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -121,6 +125,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         daily_loss_limit: args.daily_loss_limit,
         max_position_qty: args.max_position_qty,
         max_exposure_pct: args.max_exposure,
+        reference_symbols: args.reference_symbols.clone(),
     };
 
     // Connect to Python strategy server
@@ -153,6 +158,36 @@ pub async fn handle(args: RunArgs) -> Result<()> {
     let mut bars_by_interval: HashMap<String, Vec<backtest_core::types::Bar>> = HashMap::new();
     let mut initial_lookback: HashMap<(String, String), std::collections::VecDeque<backtest_core::types::Bar>> = HashMap::new();
 
+    // Combine regular + reference symbols for data loading
+    let all_symbols: Vec<String> = args
+        .symbols
+        .iter()
+        .chain(args.reference_symbols.iter())
+        .cloned()
+        .collect();
+
+    // Try to load corporate actions from instruments.db (graceful if unavailable)
+    let db_path = Path::new("./data/instruments.db");
+    let corporate_actions_by_symbol: HashMap<String, Vec<backtest_data::instruments::CorporateAction>> =
+        if db_path.exists() {
+            match InstrumentStore::open(db_path) {
+                Ok(inst_store) => {
+                    let mut map = HashMap::new();
+                    for symbol in &all_symbols {
+                        if let Ok(actions) = inst_store.get_corporate_actions(symbol, &args.exchange) {
+                            if !actions.is_empty() {
+                                map.insert(symbol.clone(), actions);
+                            }
+                        }
+                    }
+                    map
+                }
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+
     for req in &requirements {
         let req_interval = parse_interval(&req.interval)?;
         let mut interval_bars = Vec::new();
@@ -163,9 +198,15 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         let lookback_ms = lookback_days * 86_400_000;
         let adjusted_from_ms = from_ms - lookback_ms;
 
-        for symbol in &args.symbols {
+        for symbol in &all_symbols {
             // Load warmup bars (fill lookback buffer, no on_bar calls)
-            let warmup_bars = store.read(&args.exchange, symbol, req_interval, Some(adjusted_from_ms), Some(from_ms))?;
+            let mut warmup_bars = store.read(&args.exchange, symbol, req_interval, Some(adjusted_from_ms), Some(from_ms))?;
+
+            // Apply corporate action adjustments to warmup bars
+            if let Some(actions) = corporate_actions_by_symbol.get(symbol) {
+                adjust_for_corporate_actions(&mut warmup_bars, actions);
+            }
+
             if !warmup_bars.is_empty() {
                 let key = (symbol.clone(), req.interval.clone());
                 let buf = initial_lookback.entry(key).or_insert_with(std::collections::VecDeque::new);
@@ -178,7 +219,13 @@ pub async fn handle(args: RunArgs) -> Result<()> {
             }
 
             // Load active bars (engine ticks through these, calling on_bar)
-            let active_bars = store.read(&args.exchange, symbol, req_interval, Some(from_ms), Some(to_ms))?;
+            let mut active_bars = store.read(&args.exchange, symbol, req_interval, Some(from_ms), Some(to_ms))?;
+
+            // Apply corporate action adjustments to active bars
+            if let Some(actions) = corporate_actions_by_symbol.get(symbol) {
+                adjust_for_corporate_actions(&mut active_bars, actions);
+            }
+
             if active_bars.is_empty() && initial_lookback.get(&(symbol.clone(), req.interval.clone())).map_or(true, |b| b.is_empty()) {
                 eprintln!(
                     "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",

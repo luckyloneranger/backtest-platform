@@ -904,6 +904,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             custom_metrics: serde_json::json!({}),
             benchmark_return_pct: None,

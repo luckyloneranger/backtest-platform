@@ -501,6 +501,11 @@ impl BacktestEngine {
 
             // g. Submit new orders (with risk checks for buys)
             for mut signal in signals {
+                // Skip signals for non-tradable reference symbols
+                if config.reference_symbols.contains(&signal.symbol) {
+                    continue;
+                }
+
                 if signal.action == Action::Cancel {
                     matcher.cancel_orders_for_symbol(&signal.symbol);
                 } else if signal.action != Action::Hold {
@@ -810,6 +815,7 @@ mod tests {
             daily_loss_limit: None,
             max_position_qty: None,
             max_exposure_pct: None,
+            reference_symbols: vec![],
         };
 
         let mut bars_by_interval = HashMap::new();
@@ -896,6 +902,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -984,6 +991,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1092,6 +1100,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1209,6 +1218,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1340,6 +1350,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1450,6 +1461,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1539,6 +1551,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1618,6 +1631,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1690,6 +1704,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1774,6 +1789,7 @@ mod tests {
                 daily_loss_limit: Some(10_000.0), // 10K limit, loss will be 20K
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1854,6 +1870,7 @@ mod tests {
                 daily_loss_limit: Some(10_000.0),
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -1947,6 +1964,7 @@ mod tests {
                 daily_loss_limit: Some(10_000.0),
                 max_position_qty: None,
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -2026,6 +2044,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: Some(100),
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -2103,6 +2122,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: Some(100),
                 max_exposure_pct: None,
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -2188,6 +2208,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: Some(0.85), // 85% limit
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -2263,6 +2284,7 @@ mod tests {
                 daily_loss_limit: None,
                 max_position_qty: None,
                 max_exposure_pct: Some(0.85),
+                reference_symbols: vec![],
             },
             bars_by_interval,
             HashMap::new(),
@@ -2274,5 +2296,99 @@ mod tests {
         // The sell should have gone through, producing a closed trade
         assert!(!result.trades.is_empty(), "sell should not be blocked by exposure limit");
         assert_eq!(result.trades[0].quantity, 400, "should have sold 400 shares");
+    }
+
+    // ── Reference Symbol Test ────────────────────────────────────────────
+
+    /// Mock strategy that always sends a Buy signal for "INDEX" (the reference symbol).
+    struct RefSymbolMockStrategy;
+
+    #[async_trait]
+    impl StrategyClient for RefSymbolMockStrategy {
+        async fn get_requirements(&self, _name: &str, _config: &str) -> Result<Vec<IntervalRequirement>> {
+            Ok(vec![IntervalRequirement {
+                interval: "minute".into(),
+                lookback: 5,
+            }])
+        }
+
+        async fn initialize(
+            &self,
+            _name: &str,
+            _config: &str,
+            _symbols: &[String],
+            _instruments: &[InstrumentData],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn on_bar(&self, _snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+            // Always try to buy the reference symbol
+            Ok(vec![Signal::market_buy("INDEX", 10)])
+        }
+
+        async fn on_complete(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reference_symbol_signals_ignored() {
+        // Create bars for the INDEX reference symbol
+        let bars: Vec<Bar> = (0..5)
+            .map(|i| Bar {
+                timestamp_ms: i * 60000,
+                symbol: "INDEX".into(),
+                open: 20000.0 + i as f64,
+                high: 20050.0 + i as f64,
+                low: 19950.0 + i as f64,
+                close: 20010.0 + i as f64,
+                volume: 500_000,
+                oi: 0,
+            })
+            .collect();
+
+        let strategy = RefSymbolMockStrategy;
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "minute".into(),
+            lookback: 5,
+        }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "ref_test".into(),
+                symbols: vec!["INDEX".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 5,
+                max_volume_pct: 1.0,
+                max_drawdown_pct: None,
+                daily_loss_limit: None,
+                max_position_qty: None,
+                max_exposure_pct: None,
+                reference_symbols: vec!["INDEX".into()],
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &strategy,
+            vec![],
+            &requirements,
+        ).await.unwrap();
+
+        // No trades should have been executed since INDEX is a reference symbol
+        assert!(result.trades.is_empty(), "reference symbol should produce no trades");
+        // Final equity should equal initial capital (no positions were opened)
+        assert!(
+            (result.final_equity - 1_000_000.0).abs() < 1.0,
+            "no fills should occur for reference symbol"
+        );
     }
 }

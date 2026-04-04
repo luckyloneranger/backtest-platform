@@ -8,7 +8,7 @@ use rand::Rng;
 use backtest_core::calendar::TradingCalendar;
 use backtest_core::types::{Bar, Exchange, Interval};
 use backtest_data::candles::CandleStore;
-use backtest_data::instruments::InstrumentStore;
+use backtest_data::instruments::{CorporateAction, InstrumentStore};
 use backtest_data::kite::KiteClient;
 
 #[derive(Subcommand)]
@@ -49,6 +49,12 @@ pub enum DataCommands {
     },
     /// Fetch and store all instrument metadata from Kite API
     FetchInstruments,
+    /// Import corporate actions (splits, bonuses, dividends) from a CSV file
+    ImportCorporateActions {
+        /// Path to CSV file (format: symbol,exchange,date,type,ratio)
+        #[arg(long)]
+        file: String,
+    },
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -76,6 +82,7 @@ pub async fn handle(cmd: DataCommands) -> Result<()> {
             start_price,
         } => handle_generate_test_data(&symbol, &from, &to, &interval, start_price),
         DataCommands::FetchInstruments => handle_fetch_instruments().await,
+        DataCommands::ImportCorporateActions { file } => handle_import_corporate_actions(&file),
     }
 }
 
@@ -388,4 +395,55 @@ fn generate_bar(rng: &mut impl Rng, symbol: &str, timestamp_ms: i64, prev_close:
         volume,
         oi: 0,
     }
+}
+
+fn handle_import_corporate_actions(file: &str) -> Result<()> {
+    let content = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read file: {}", file))?;
+
+    // Ensure the data directory exists
+    std::fs::create_dir_all("./data").context("failed to create ./data directory")?;
+
+    let store = InstrumentStore::open(Path::new("./data/instruments.db"))?;
+    let mut count = 0;
+
+    for (line_no, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip header line if present
+        if line_no == 0 && line.to_lowercase().starts_with("symbol") {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() != 5 {
+            eprintln!(
+                "Warning: skipping line {} (expected 5 fields, got {}): {}",
+                line_no + 1,
+                parts.len(),
+                line
+            );
+            continue;
+        }
+
+        let ratio: f64 = parts[4].trim().parse().with_context(|| {
+            format!("invalid ratio on line {}: {}", line_no + 1, parts[4])
+        })?;
+
+        let action = CorporateAction {
+            symbol: parts[0].trim().to_string(),
+            exchange: parts[1].trim().to_string(),
+            date: parts[2].trim().to_string(),
+            action_type: parts[3].trim().to_string(),
+            ratio,
+        };
+
+        store.insert_corporate_action(&action)?;
+        count += 1;
+    }
+
+    println!("Imported {} corporate actions into ./data/instruments.db", count);
+    Ok(())
 }

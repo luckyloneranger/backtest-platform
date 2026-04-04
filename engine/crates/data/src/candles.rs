@@ -12,6 +12,8 @@ use parquet::arrow::ArrowWriter;
 
 use backtest_core::types::{Bar, Interval};
 
+use crate::instruments::CorporateAction;
+
 /// Reads and writes candle (Bar) data as Parquet files.
 ///
 /// File layout: `{base_path}/{exchange}/{symbol}/{interval_str}/data.parquet`
@@ -228,6 +230,49 @@ impl CandleStore {
     }
 }
 
+// ── Corporate Action Adjustments ──────────────────────────────────────────────
+
+/// Adjust bar prices for corporate actions (splits, bonuses, dividends).
+///
+/// For SPLIT and BONUS: bars *before* the action date have OHLC divided by the
+/// ratio and volume multiplied by the ratio.
+///
+/// For DIVIDEND: bars *before* the action date have OHLC reduced by the
+/// dividend amount (ratio).
+pub fn adjust_for_corporate_actions(bars: &mut Vec<Bar>, actions: &[CorporateAction]) {
+    for action in actions {
+        let action_date_ms = chrono::NaiveDate::parse_from_str(&action.date, "%Y-%m-%d")
+            .map(|d| {
+                d.and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis()
+            })
+            .unwrap_or(0);
+
+        for bar in bars.iter_mut() {
+            if bar.timestamp_ms < action_date_ms {
+                match action.action_type.as_str() {
+                    "SPLIT" | "BONUS" => {
+                        bar.open /= action.ratio;
+                        bar.high /= action.ratio;
+                        bar.low /= action.ratio;
+                        bar.close /= action.ratio;
+                        bar.volume = (bar.volume as f64 * action.ratio) as i64;
+                    }
+                    "DIVIDEND" => {
+                        bar.open -= action.ratio;
+                        bar.high -= action.ratio;
+                        bar.low -= action.ratio;
+                        bar.close -= action.ratio;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -394,5 +439,104 @@ mod tests {
         assert!((bars[0].open - 1500.0).abs() < f64::EPSILON);
         assert!((bars[0].close - 1520.0).abs() < f64::EPSILON);
         assert_eq!(bars[0].volume, 80_000);
+    }
+
+    // ── Corporate Action Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_split_adjustment() {
+        // Bar before the split date at OHLC=1000, 1:2 split
+        // 2024-10-01 00:00:00 UTC = 1727740800000 ms
+        let mut bars = vec![Bar {
+            timestamp_ms: 1_727_740_800_000,
+            symbol: "RELIANCE".to_string(),
+            open: 1000.0,
+            high: 1050.0,
+            low: 950.0,
+            close: 1000.0,
+            volume: 100_000,
+            oi: 0,
+        }];
+
+        let actions = vec![CorporateAction {
+            symbol: "RELIANCE".to_string(),
+            exchange: "NSE".to_string(),
+            date: "2024-10-28".to_string(), // split date is after the bar
+            action_type: "SPLIT".to_string(),
+            ratio: 2.0,
+        }];
+
+        adjust_for_corporate_actions(&mut bars, &actions);
+
+        assert!((bars[0].open - 500.0).abs() < f64::EPSILON);
+        assert!((bars[0].high - 525.0).abs() < f64::EPSILON);
+        assert!((bars[0].low - 475.0).abs() < f64::EPSILON);
+        assert!((bars[0].close - 500.0).abs() < f64::EPSILON);
+        assert_eq!(bars[0].volume, 200_000);
+    }
+
+    #[test]
+    fn test_dividend_adjustment() {
+        // Bar before the dividend date at close=1000, ₹10 dividend
+        let mut bars = vec![Bar {
+            timestamp_ms: 1_727_740_800_000, // 2024-10-01
+            symbol: "RELIANCE".to_string(),
+            open: 1000.0,
+            high: 1050.0,
+            low: 950.0,
+            close: 1000.0,
+            volume: 100_000,
+            oi: 0,
+        }];
+
+        let actions = vec![CorporateAction {
+            symbol: "RELIANCE".to_string(),
+            exchange: "NSE".to_string(),
+            date: "2024-10-28".to_string(),
+            action_type: "DIVIDEND".to_string(),
+            ratio: 10.0,
+        }];
+
+        adjust_for_corporate_actions(&mut bars, &actions);
+
+        assert!((bars[0].open - 990.0).abs() < f64::EPSILON);
+        assert!((bars[0].high - 1040.0).abs() < f64::EPSILON);
+        assert!((bars[0].low - 940.0).abs() < f64::EPSILON);
+        assert!((bars[0].close - 990.0).abs() < f64::EPSILON);
+        // Volume unchanged for dividends
+        assert_eq!(bars[0].volume, 100_000);
+    }
+
+    #[test]
+    fn test_no_adjustment_after_action_date() {
+        // Bar AFTER the action date should be unchanged
+        // 2024-11-01 00:00:00 UTC = 1730419200000 ms
+        let mut bars = vec![Bar {
+            timestamp_ms: 1_730_419_200_000,
+            symbol: "RELIANCE".to_string(),
+            open: 1000.0,
+            high: 1050.0,
+            low: 950.0,
+            close: 1000.0,
+            volume: 100_000,
+            oi: 0,
+        }];
+
+        let actions = vec![CorporateAction {
+            symbol: "RELIANCE".to_string(),
+            exchange: "NSE".to_string(),
+            date: "2024-10-28".to_string(), // action date is before the bar
+            action_type: "SPLIT".to_string(),
+            ratio: 2.0,
+        }];
+
+        adjust_for_corporate_actions(&mut bars, &actions);
+
+        // Bar after action date should be unchanged
+        assert!((bars[0].open - 1000.0).abs() < f64::EPSILON);
+        assert!((bars[0].high - 1050.0).abs() < f64::EPSILON);
+        assert!((bars[0].low - 950.0).abs() < f64::EPSILON);
+        assert!((bars[0].close - 1000.0).abs() < f64::EPSILON);
+        assert_eq!(bars[0].volume, 100_000);
     }
 }

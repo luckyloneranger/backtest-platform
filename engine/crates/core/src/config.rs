@@ -40,6 +40,10 @@ pub struct BacktestConfig {
     /// Buy orders that would push exposure above this are rejected.
     #[serde(default)]
     pub max_exposure_pct: Option<f64>,
+    /// Non-tradable reference symbols (e.g. NIFTY 50 index). Their data appears
+    /// in MarketSnapshot but signals for them are silently dropped.
+    #[serde(default)]
+    pub reference_symbols: Vec<String>,
 }
 
 fn default_lookback() -> usize {
@@ -72,6 +76,7 @@ mod tests {
             daily_loss_limit: None,
             max_position_qty: None,
             max_exposure_pct: None,
+            reference_symbols: vec![],
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -99,6 +104,7 @@ mod tests {
             daily_loss_limit: None,
             max_position_qty: None,
             max_exposure_pct: None,
+            reference_symbols: vec![],
         };
 
         let json = serde_json::to_string(&config).expect("serialize");

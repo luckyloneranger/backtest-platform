@@ -4,6 +4,17 @@ use std::path::Path;
 
 use backtest_core::types::{Exchange, Instrument, InstrumentType};
 
+// ── CorporateAction ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CorporateAction {
+    pub symbol: String,
+    pub exchange: String,
+    pub date: String,           // YYYY-MM-DD
+    pub action_type: String,    // "SPLIT", "BONUS", "DIVIDEND"
+    pub ratio: f64,             // 2.0 for 1:2 split, 5.0 for ₹5 dividend
+}
+
 // ── String conversions for SQLite storage ────────────────────────────────────
 
 fn exchange_to_str(e: Exchange) -> &'static str {
@@ -84,6 +95,30 @@ const LIST_BY_EXCHANGE: &str = "
     WHERE exchange = ?1;
 ";
 
+const CREATE_CORPORATE_ACTIONS: &str = "
+    CREATE TABLE IF NOT EXISTS corporate_actions (
+        symbol TEXT NOT NULL,
+        exchange TEXT NOT NULL,
+        date TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        ratio REAL NOT NULL,
+        PRIMARY KEY (symbol, exchange, date, action_type)
+    );
+";
+
+const UPSERT_CORPORATE_ACTION: &str = "
+    INSERT OR REPLACE INTO corporate_actions
+        (symbol, exchange, date, action_type, ratio)
+    VALUES (?1, ?2, ?3, ?4, ?5);
+";
+
+const GET_CORPORATE_ACTIONS: &str = "
+    SELECT symbol, exchange, date, action_type, ratio
+    FROM corporate_actions
+    WHERE symbol = ?1 AND exchange = ?2
+    ORDER BY date ASC;
+";
+
 // ── InstrumentStore ─────────────────────────────────────────────────────────
 
 /// Wraps a `rusqlite::Connection` to store and query instrument metadata.
@@ -117,6 +152,7 @@ impl InstrumentStore {
             conn.execute_batch(DROP_TABLE)?;
         }
         conn.execute_batch(CREATE_TABLE)?;
+        conn.execute_batch(CREATE_CORPORATE_ACTIONS)?;
         Ok(())
     }
 
@@ -170,6 +206,38 @@ impl InstrumentStore {
         let mut result = Vec::new();
         for row in rows {
             result.push(row??);
+        }
+        Ok(result)
+    }
+
+    /// Insert a corporate action record (split, bonus, or dividend).
+    pub fn insert_corporate_action(&self, action: &CorporateAction) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(UPSERT_CORPORATE_ACTION)?;
+        stmt.execute(params![
+            action.symbol,
+            action.exchange,
+            action.date,
+            action.action_type,
+            action.ratio,
+        ])?;
+        Ok(())
+    }
+
+    /// Get all corporate actions for a given symbol and exchange, ordered by date.
+    pub fn get_corporate_actions(&self, symbol: &str, exchange: &str) -> Result<Vec<CorporateAction>> {
+        let mut stmt = self.conn.prepare_cached(GET_CORPORATE_ACTIONS)?;
+        let rows = stmt.query_map(params![symbol, exchange], |row| {
+            Ok(CorporateAction {
+                symbol: row.get(0)?,
+                exchange: row.get(1)?,
+                date: row.get(2)?,
+                action_type: row.get(3)?,
+                ratio: row.get(4)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
         }
         Ok(result)
     }
@@ -282,5 +350,47 @@ mod tests {
             .collect();
         assert!(symbols.contains(&"RELIANCE"));
         assert!(symbols.contains(&"INFY"));
+    }
+
+    #[test]
+    fn test_corporate_actions_db_roundtrip() {
+        let store = InstrumentStore::in_memory().expect("failed to create in-memory store");
+
+        let split = CorporateAction {
+            symbol: "RELIANCE".to_string(),
+            exchange: "NSE".to_string(),
+            date: "2024-10-28".to_string(),
+            action_type: "SPLIT".to_string(),
+            ratio: 2.0,
+        };
+        let dividend = CorporateAction {
+            symbol: "RELIANCE".to_string(),
+            exchange: "NSE".to_string(),
+            date: "2024-09-15".to_string(),
+            action_type: "DIVIDEND".to_string(),
+            ratio: 10.0,
+        };
+
+        store.insert_corporate_action(&split).expect("insert split failed");
+        store.insert_corporate_action(&dividend).expect("insert dividend failed");
+
+        let actions = store
+            .get_corporate_actions("RELIANCE", "NSE")
+            .expect("get_corporate_actions failed");
+
+        assert_eq!(actions.len(), 2);
+        // Results are ordered by date ASC, so dividend (2024-09-15) comes first
+        assert_eq!(actions[0].action_type, "DIVIDEND");
+        assert_eq!(actions[0].date, "2024-09-15");
+        assert!((actions[0].ratio - 10.0).abs() < f64::EPSILON);
+        assert_eq!(actions[1].action_type, "SPLIT");
+        assert_eq!(actions[1].date, "2024-10-28");
+        assert!((actions[1].ratio - 2.0).abs() < f64::EPSILON);
+
+        // Verify no results for a different symbol
+        let empty = store
+            .get_corporate_actions("INFY", "NSE")
+            .expect("get_corporate_actions failed");
+        assert!(empty.is_empty());
     }
 }
