@@ -129,7 +129,7 @@ async fn handle_fetch(
     let interval_enum = parse_interval(interval)?;
     let client = KiteClient::new(api_key, access_token);
     let bars = client
-        .fetch_candles(&resolved_token, symbol, interval_enum, from, to, continuous)
+        .fetch_candles_chunked(&resolved_token, symbol, interval_enum, from, to, continuous)
         .await?;
 
     let store = CandleStore::new(Path::new("./data"));

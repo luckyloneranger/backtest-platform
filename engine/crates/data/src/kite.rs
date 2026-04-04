@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use serde::Deserialize;
 
 use backtest_core::types::{Bar, Exchange, Instrument, InstrumentType, Interval};
@@ -125,6 +126,75 @@ impl KiteClient {
             .context("failed to read candles response body")?;
 
         parse_candles_json(&json_text, symbol)
+    }
+
+    /// Maximum candles returned by a single Kite historical-data request.
+    const KITE_MAX_CANDLES: usize = 2000;
+
+    /// Fetch historical candles with automatic chunking to stay under
+    /// Kite's ~2000-candle-per-request limit.
+    ///
+    /// Splits the date range into chunks based on the interval's `bars_per_day()`,
+    /// makes sequential API calls with a rate-limit pause between them, and
+    /// concatenates the results.
+    pub async fn fetch_candles_chunked(
+        &self,
+        instrument_token: &str,
+        symbol: &str,
+        interval: Interval,
+        from: &str,  // "YYYY-MM-DD"
+        to: &str,    // "YYYY-MM-DD"
+        continuous: bool,
+    ) -> Result<Vec<Bar>> {
+        let from_date = NaiveDate::parse_from_str(from, "%Y-%m-%d")
+            .context("invalid 'from' date format, expected YYYY-MM-DD")?;
+        let to_date = NaiveDate::parse_from_str(to, "%Y-%m-%d")
+            .context("invalid 'to' date format, expected YYYY-MM-DD")?;
+
+        let bars_per_day = interval.bars_per_day();
+        let days_per_chunk = if bars_per_day <= 1 {
+            2000 // day interval: 2000 days per chunk (~8 years)
+        } else {
+            (Self::KITE_MAX_CANDLES / bars_per_day).max(1)
+        };
+
+        let mut all_bars = Vec::new();
+        let mut chunk_start = from_date;
+        let mut chunk_num = 0u32;
+
+        while chunk_start <= to_date {
+            let chunk_end_raw =
+                chunk_start + chrono::Duration::days(days_per_chunk as i64 - 1);
+            let chunk_end = if chunk_end_raw > to_date {
+                to_date
+            } else {
+                chunk_end_raw
+            };
+
+            let from_str = chunk_start.format("%Y-%m-%d").to_string();
+            let to_str = chunk_end.format("%Y-%m-%d").to_string();
+
+            // Rate limit: sleep between requests (Kite allows ~3 req/sec for historical data)
+            if chunk_num > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            }
+
+            let bars = self
+                .fetch_candles(instrument_token, symbol, interval, &from_str, &to_str, continuous)
+                .await?;
+
+            let count = bars.len();
+            all_bars.extend(bars);
+
+            if count > 0 {
+                eprintln!("  Fetched {} candles ({} to {})", count, from_str, to_str);
+            }
+
+            chunk_start = chunk_end + chrono::Duration::days(1);
+            chunk_num += 1;
+        }
+
+        Ok(all_bars)
     }
 }
 
@@ -542,6 +612,21 @@ instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick
         // 2024-01-02T03:45:00+0000
         let ms = parse_kite_timestamp("2024-01-02T03:45:00+0000").expect("parse should succeed");
         assert_eq!(ms, 1704167100000);
+    }
+
+    // -- Chunk size calculation tests --
+
+    #[test]
+    fn test_chunk_size_calculation() {
+        use backtest_core::types::Interval;
+        // For Minute: 2000 / 375 = 5 days per chunk
+        assert_eq!(2000 / Interval::Minute.bars_per_day(), 5);
+        // For Day: bars_per_day=1, special case -> 2000 days
+        assert_eq!(Interval::Day.bars_per_day(), 1);
+        // For Minute5: 2000 / 75 = 26 days per chunk
+        assert_eq!(2000 / Interval::Minute5.bars_per_day(), 26);
+        // For Minute15: 2000 / 25 = 80 days per chunk
+        assert_eq!(2000 / Interval::Minute15.bars_per_day(), 80);
     }
 
     // -- Mixed / multi-exchange CSV tests --
