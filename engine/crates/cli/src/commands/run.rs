@@ -47,6 +47,10 @@ pub struct RunArgs {
     /// Slippage percentage (e.g., 0.001 = 0.1%)
     #[arg(long, default_value = "0.001")]
     pub slippage: f64,
+
+    /// Number of historical bars to keep per symbol for strategy lookback
+    #[arg(long, default_value = "200")]
+    pub lookback: usize,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -70,6 +74,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         strategy_params,
         slippage_pct: args.slippage,
         margin_available: None,
+        lookback_window: args.lookback,
     };
 
     // Read candles from CandleStore at ./data/
@@ -115,7 +120,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         args.to,
     );
 
-    let result = BacktestEngine::run(config, all_bars, &strategy).await?;
+    let result = BacktestEngine::run(config, all_bars, &strategy, vec![]).await?;
 
     // Save results
     let reporter = Reporter::new(Path::new("./results"));

@@ -319,6 +319,7 @@ mod tests {
                 strategy_params: serde_json::json!({"fast": 10, "slow": 30}),
                 slippage_pct: 0.05,
                 margin_available: None,
+                lookback_window: 200,
             },
             custom_metrics: serde_json::json!({"custom_key": 42}),
         }
@@ -437,6 +438,7 @@ mod tests {
                 strategy_params: serde_json::json!({}),
                 slippage_pct: 0.0,
                 margin_available: None,
+                lookback_window: 200,
             },
             custom_metrics: serde_json::json!({}),
         };

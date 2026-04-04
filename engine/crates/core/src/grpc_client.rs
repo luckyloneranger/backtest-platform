@@ -4,12 +4,15 @@ use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
 use backtest_proto::backtest::{
-    strategy_service_client::StrategyServiceClient, BarEvent, CompleteRequest, InitRequest,
-    PortfolioState, PositionInfo,
+    strategy_service_client::StrategyServiceClient, BarData, BarEvent, CompleteRequest,
+    FillInfo, InitRequest, InstrumentInfo, OrderRejection as ProtoOrderRejection,
+    PortfolioState, PositionInfo, SessionContext as ProtoSessionContext,
+    SymbolHistory, TradeInfo,
 };
 
-use crate::engine::StrategyClient;
-use crate::types::{Action, Bar, OrderType, Portfolio, Signal};
+use crate::engine::{InstrumentData, MarketSnapshot, StrategyClient};
+use crate::matching::Side;
+use crate::types::{Action, OrderType, Signal};
 
 // ── GrpcStrategyClient ─────────────────────────────────────────────────────
 
@@ -40,14 +43,37 @@ impl GrpcStrategyClient {
 
 #[async_trait]
 impl StrategyClient for GrpcStrategyClient {
-    async fn initialize(&self, name: &str, config: &str, symbols: &[String]) -> Result<()> {
+    async fn initialize(
+        &self,
+        name: &str,
+        config: &str,
+        symbols: &[String],
+        instruments: &[InstrumentData],
+    ) -> Result<()> {
         let mut client = self.client.lock().await.clone();
+
+        let proto_instruments: Vec<InstrumentInfo> = instruments
+            .iter()
+            .map(|inst| InstrumentInfo {
+                symbol: inst.symbol.clone(),
+                exchange: inst.exchange.clone(),
+                instrument_type: inst.instrument_type.clone(),
+                lot_size: inst.lot_size,
+                tick_size: inst.tick_size,
+                expiry: inst.expiry.clone(),
+                strike: inst.strike,
+                option_type: inst.option_type.clone(),
+                circuit_limit_upper: inst.circuit_limit_upper,
+                circuit_limit_lower: inst.circuit_limit_lower,
+            })
+            .collect();
 
         let resp = client
             .initialize(InitRequest {
                 strategy_name: name.into(),
                 config_json: config.into(),
                 symbols: symbols.to_vec(),
+                instruments: proto_instruments,
             })
             .await?
             .into_inner();
@@ -58,14 +84,15 @@ impl StrategyClient for GrpcStrategyClient {
         Ok(())
     }
 
-    async fn on_bar(&self, bar: &Bar, portfolio: &Portfolio) -> Result<Vec<Signal>> {
+    async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
         let mut client = self.client.lock().await.clone();
 
         // Convert domain Portfolio -> proto PortfolioState
         let proto_portfolio = PortfolioState {
-            cash: portfolio.cash,
-            equity: portfolio.equity(),
-            positions: portfolio
+            cash: snapshot.portfolio.cash,
+            equity: snapshot.portfolio.equity(),
+            positions: snapshot
+                .portfolio
                 .positions
                 .iter()
                 .map(|p| PositionInfo {
@@ -77,17 +104,130 @@ impl StrategyClient for GrpcStrategyClient {
                 .collect(),
         };
 
-        // Convert domain Bar -> proto BarEvent
+        // Convert domain bars -> proto BarData
+        let proto_bars: Vec<BarData> = snapshot
+            .bars
+            .values()
+            .map(|b| BarData {
+                symbol: b.symbol.clone(),
+                open: b.open,
+                high: b.high,
+                low: b.low,
+                close: b.close,
+                volume: b.volume,
+                oi: b.oi,
+            })
+            .collect();
+
+        // Convert history -> proto SymbolHistory
+        let proto_history: Vec<SymbolHistory> = snapshot
+            .history
+            .iter()
+            .map(|(sym, bars)| SymbolHistory {
+                symbol: sym.clone(),
+                bars: bars
+                    .iter()
+                    .map(|b| BarData {
+                        symbol: b.symbol.clone(),
+                        open: b.open,
+                        high: b.high,
+                        low: b.low,
+                        close: b.close,
+                        volume: b.volume,
+                        oi: b.oi,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        // Convert instruments -> proto InstrumentInfo
+        let proto_instruments: Vec<InstrumentInfo> = snapshot
+            .instruments
+            .iter()
+            .map(|inst| InstrumentInfo {
+                symbol: inst.symbol.clone(),
+                exchange: inst.exchange.clone(),
+                instrument_type: inst.instrument_type.clone(),
+                lot_size: inst.lot_size,
+                tick_size: inst.tick_size,
+                expiry: inst.expiry.clone(),
+                strike: inst.strike,
+                option_type: inst.option_type.clone(),
+                circuit_limit_upper: inst.circuit_limit_upper,
+                circuit_limit_lower: inst.circuit_limit_lower,
+            })
+            .collect();
+
+        // Convert fills -> proto FillInfo
+        let proto_fills: Vec<FillInfo> = snapshot
+            .fills
+            .iter()
+            .map(|f| FillInfo {
+                symbol: f.symbol.clone(),
+                side: match f.side {
+                    Side::Buy => "BUY".into(),
+                    Side::Sell => "SELL".into(),
+                },
+                quantity: f.quantity,
+                fill_price: f.fill_price,
+                costs: 0.0, // costs are tracked in portfolio, not in fills
+                timestamp_ms: f.timestamp_ms,
+            })
+            .collect();
+
+        // Convert rejections -> proto OrderRejection
+        let proto_rejections: Vec<ProtoOrderRejection> = snapshot
+            .rejections
+            .iter()
+            .map(|r| ProtoOrderRejection {
+                symbol: r.symbol.clone(),
+                side: match r.side {
+                    Side::Buy => "BUY".into(),
+                    Side::Sell => "SELL".into(),
+                },
+                quantity: r.quantity,
+                reason: r.reason.clone(),
+            })
+            .collect();
+
+        // Convert closed trades -> proto TradeInfo
+        let proto_trades: Vec<TradeInfo> = snapshot
+            .closed_trades
+            .iter()
+            .map(|t| TradeInfo {
+                symbol: t.symbol.clone(),
+                quantity: t.quantity,
+                entry_price: t.entry_price,
+                exit_price: t.exit_price,
+                entry_timestamp_ms: t.entry_timestamp_ms,
+                exit_timestamp_ms: t.exit_timestamp_ms,
+                pnl: t.pnl,
+                costs: t.costs,
+            })
+            .collect();
+
+        // Convert context -> proto SessionContext
+        let proto_context = ProtoSessionContext {
+            initial_capital: snapshot.context.initial_capital,
+            bar_number: snapshot.context.bar_number,
+            total_bars: snapshot.context.total_bars,
+            start_date: snapshot.context.start_date.clone(),
+            end_date: snapshot.context.end_date.clone(),
+            interval: snapshot.context.interval.clone(),
+            lookback_window: snapshot.context.lookback_window,
+        };
+
+        // Build enriched BarEvent
         let bar_event = BarEvent {
-            timestamp_ms: bar.timestamp_ms,
-            symbol: bar.symbol.clone(),
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            volume: bar.volume,
-            oi: bar.oi,
+            timestamp_ms: snapshot.timestamp_ms,
+            bars: proto_bars,
+            history: proto_history,
             portfolio: Some(proto_portfolio),
+            instruments: proto_instruments,
+            fills: proto_fills,
+            rejections: proto_rejections,
+            closed_trades: proto_trades,
+            context: Some(proto_context),
         };
 
         let resp = client.on_bar(bar_event).await?.into_inner();
