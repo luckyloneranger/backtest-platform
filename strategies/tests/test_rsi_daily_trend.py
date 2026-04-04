@@ -368,3 +368,115 @@ def test_max_loss_exit():
     sell_sigs = [sig for sig in sigs if sig.action == "SELL"]
     assert len(sell_sigs) >= 1, "Should exit when price drops > max_loss_pct below avg entry"
     assert state.pyramid_level == 0, "State should be reset after max loss exit"
+
+
+# --- Short selling tests ---
+
+def test_short_entry_on_rsi_overbought_downtrend():
+    """Downtrend + RSI > 60 should produce a SELL signal to open a short position."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_downtrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup: descending prices to seed RSI (RSI will be low after this)
+    warmup = [100, 99, 98, 97, 96, 95, 94]
+    _feed_15m_prices(s, warmup)
+    assert state.direction == "flat"
+
+    # Now prices rise sharply to push RSI above 60 (overbought in downtrend)
+    # With rsi_period=5, a sharp rise will push RSI high quickly
+    current_qty = 0
+    ts = 200
+    sell_signals = []
+    rise = [96, 100, 104, 108, 112]
+    for p in rise:
+        # Short positions have negative quantity in portfolio
+        pos = [Position(symbol="TEST", quantity=-current_qty, avg_price=104.0, unrealized_pnl=0.0)] if current_qty > 0 else []
+        snap = make_snapshot(ts, close_15m=float(p), positions=pos)
+        sigs = s.on_bar(snap)
+        for sig in sigs:
+            if sig.action == "SELL":
+                sell_signals.append(sig)
+                current_qty += sig.quantity
+        ts += 1
+
+    assert len(sell_signals) >= 1, f"Expected at least 1 short SELL signal, got {len(sell_signals)}"
+    assert state.direction == "short", f"Expected direction='short', got '{state.direction}'"
+    assert state.pyramid_level >= 1, f"Expected pyramid_level >= 1, got {state.pyramid_level}"
+    assert sell_signals[0].product_type == "MIS", "Short signal should use MIS product type"
+
+
+def test_short_exit_on_rsi_oversold():
+    """Short position should be covered (BUY) when RSI drops below 30."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_downtrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup: descending then ascending to seed RSI
+    warmup = [100, 99, 98, 97, 96, 95, 94]
+    _feed_15m_prices(s, warmup)
+
+    # Rise to enter short position
+    current_qty = 0
+    ts = 200
+    rise = [96, 100, 104, 108, 112]
+    for p in rise:
+        pos = [Position(symbol="TEST", quantity=-current_qty, avg_price=104.0, unrealized_pnl=0.0)] if current_qty > 0 else []
+        snap = make_snapshot(ts, close_15m=float(p), positions=pos)
+        sigs = s.on_bar(snap)
+        for sig in sigs:
+            if sig.action == "SELL":
+                current_qty += sig.quantity
+        ts += 1
+
+    assert state.direction == "short", "Should have entered short"
+    assert current_qty > 0, "Should have short quantity"
+
+    # Set up for full cover test
+    state.partial_taken = True  # skip partial exit path
+    state.avg_entry_price = 108.0
+
+    # Drop prices sharply to push RSI below 30 (short full exit threshold)
+    # rsi_full_exit=70, short_full_exit = 100 - 70 = 30
+    held = Position(symbol="TEST", quantity=-current_qty, avg_price=108.0, unrealized_pnl=0.0)
+    drop = [110, 106, 100, 94, 88, 82, 76]
+    buy_sigs = []
+    for p in drop:
+        snap = make_snapshot(ts, close_15m=float(p), positions=[held])
+        sigs = s.on_bar(snap)
+        for sig in sigs:
+            if sig.action == "BUY":
+                buy_sigs.append(sig)
+        if buy_sigs:
+            break
+        ts += 1
+
+    assert len(buy_sigs) >= 1, "Should trigger full cover (BUY) when RSI < 30"
+    assert state.pyramid_level == 0, "State should be reset after short cover"
+    assert state.direction == "flat", "Direction should be flat after full cover"
+
+
+def test_no_short_in_uptrend():
+    """RSI > 60 but trend is UP should NOT produce a short entry."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_uptrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup: descending prices to seed RSI
+    warmup = [100, 99, 98, 97, 96, 95, 94]
+    _feed_15m_prices(s, warmup)
+
+    # Rise to push RSI above 60 -- but trend is UP so no short entry
+    rise = [96, 100, 104, 108, 112, 116, 120]
+    sigs = _feed_15m_prices(s, rise, start_ts=200)
+
+    # Should NOT have any SELL signals from short entry (only possible SELL from long exit)
+    # Since we never entered long (RSI wasn't < 40 during uptrend with these prices),
+    # there should be no signals at all.
+    sell_sigs = [sig for sig in sigs if sig.action == "SELL"]
+    assert len(sell_sigs) == 0, \
+        f"Should NOT open short in uptrend, but got {len(sell_sigs)} SELL signals"
+    assert state.direction == "flat", "Should remain flat -- no short in uptrend"
