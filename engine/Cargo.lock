@@ -427,6 +427,7 @@ dependencies = [
  "arrow",
  "backtest-core",
  "chrono",
+ "csv",
  "parquet",
  "reqwest",
  "rusqlite",
