@@ -130,7 +130,9 @@ pub enum InstrumentType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instrument {
+    pub instrument_token: Option<String>,
     pub tradingsymbol: String,
+    pub name: Option<String>,
     pub exchange: Exchange,
     pub instrument_type: InstrumentType,
     pub lot_size: i32,
@@ -138,6 +140,7 @@ pub struct Instrument {
     pub expiry: Option<String>,
     pub strike: Option<f64>,
     pub option_type: Option<String>,
+    pub segment: Option<String>,
 }
 
 // ── Interval ─────────────────────────────────────────────────────────────────

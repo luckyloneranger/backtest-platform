@@ -5,8 +5,9 @@ use chrono::NaiveDate;
 use clap::Subcommand;
 use rand::Rng;
 
-use backtest_core::types::{Bar, Interval};
+use backtest_core::types::{Bar, Exchange, Interval};
 use backtest_data::candles::CandleStore;
+use backtest_data::instruments::InstrumentStore;
 use backtest_data::kite::KiteClient;
 
 #[derive(Subcommand)]
@@ -21,9 +22,11 @@ pub enum DataCommands {
         to: String,
         #[arg(long, default_value = "day")]
         interval: String,
-        /// Kite instrument token
+        /// Kite instrument token (auto-resolved from instruments.db if omitted)
         #[arg(long)]
-        token: String,
+        token: Option<String>,
+        #[arg(long, default_value = "NSE")]
+        exchange: String,
     },
     /// List cached data
     List,
@@ -40,6 +43,8 @@ pub enum DataCommands {
         #[arg(long, default_value = "1000.0")]
         start_price: f64,
     },
+    /// Fetch and store all instrument metadata from Kite API
+    FetchInstruments,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -55,7 +60,8 @@ pub async fn handle(cmd: DataCommands) -> Result<()> {
             to,
             interval,
             token,
-        } => handle_fetch(&symbol, &from, &to, &interval, &token).await,
+            exchange,
+        } => handle_fetch(&symbol, &from, &to, &interval, &token, &exchange).await,
         DataCommands::List => handle_list(),
         DataCommands::GenerateTestData {
             symbol,
@@ -64,6 +70,16 @@ pub async fn handle(cmd: DataCommands) -> Result<()> {
             interval,
             start_price,
         } => handle_generate_test_data(&symbol, &from, &to, &interval, start_price),
+        DataCommands::FetchInstruments => handle_fetch_instruments().await,
+    }
+}
+
+fn parse_exchange(s: &str) -> Result<Exchange> {
+    match s {
+        "NSE" => Ok(Exchange::Nse),
+        "BSE" => Ok(Exchange::Bse),
+        "MCX" => Ok(Exchange::Mcx),
+        _ => anyhow::bail!("unsupported exchange '{}'. Use: NSE, BSE, MCX", s),
     }
 }
 
@@ -72,23 +88,71 @@ async fn handle_fetch(
     from: &str,
     to: &str,
     interval: &str,
-    token: &str,
+    token: &Option<String>,
+    exchange: &str,
 ) -> Result<()> {
     let api_key =
         std::env::var("KITE_API_KEY").context("KITE_API_KEY environment variable not set")?;
     let access_token = std::env::var("KITE_ACCESS_TOKEN")
         .context("KITE_ACCESS_TOKEN environment variable not set")?;
 
+    let resolved_token = match token {
+        Some(t) => t.clone(),
+        None => {
+            let db_path = Path::new("./data/instruments.db");
+            if !db_path.exists() {
+                anyhow::bail!(
+                    "No instrument token provided and ./data/instruments.db not found. \
+                     Run 'backtest data fetch-instruments' first, or pass --token."
+                );
+            }
+            let store = InstrumentStore::open(db_path)?;
+            let exchange_enum = parse_exchange(exchange)?;
+            store
+                .find_token(symbol, exchange_enum)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No instrument_token found for {}:{}. \
+                         Run 'backtest data fetch-instruments' first, or pass --token.",
+                        exchange,
+                        symbol
+                    )
+                })?
+        }
+    };
+
     let interval_enum = parse_interval(interval)?;
     let client = KiteClient::new(api_key, access_token);
     let bars = client
-        .fetch_candles(token, symbol, interval_enum, from, to)
+        .fetch_candles(&resolved_token, symbol, interval_enum, from, to)
         .await?;
 
     let store = CandleStore::new(Path::new("./data"));
-    store.write("NSE", symbol, interval_enum, &bars)?;
+    store.write(exchange, symbol, interval_enum, &bars)?;
 
     println!("Fetched {} candles for {}", bars.len(), symbol);
+    Ok(())
+}
+
+async fn handle_fetch_instruments() -> Result<()> {
+    let api_key =
+        std::env::var("KITE_API_KEY").context("KITE_API_KEY environment variable not set")?;
+    let access_token = std::env::var("KITE_ACCESS_TOKEN")
+        .context("KITE_ACCESS_TOKEN environment variable not set")?;
+
+    let client = KiteClient::new(api_key, access_token);
+    let instruments = client.fetch_instruments().await?;
+
+    // Ensure the data directory exists
+    std::fs::create_dir_all("./data").context("failed to create ./data directory")?;
+
+    let store = InstrumentStore::open(Path::new("./data/instruments.db"))?;
+    store.upsert(&instruments)?;
+
+    println!(
+        "Stored {} instruments in ./data/instruments.db",
+        instruments.len()
+    );
     Ok(())
 }
 

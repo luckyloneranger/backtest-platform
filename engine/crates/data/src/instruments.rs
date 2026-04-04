@@ -44,36 +44,42 @@ fn str_to_instrument_type(s: &str) -> Result<InstrumentType> {
 
 // ── SQL ──────────────────────────────────────────────────────────────────────
 
+const DROP_TABLE: &str = "DROP TABLE IF EXISTS instruments;";
+
 const CREATE_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS instruments (
-        tradingsymbol  TEXT    NOT NULL,
-        exchange       TEXT    NOT NULL,
-        instrument_type TEXT   NOT NULL,
-        lot_size       INTEGER NOT NULL,
-        tick_size      REAL    NOT NULL,
-        expiry         TEXT,
-        strike         REAL,
-        option_type    TEXT,
+        instrument_token TEXT,
+        tradingsymbol    TEXT    NOT NULL,
+        name             TEXT,
+        exchange         TEXT    NOT NULL,
+        instrument_type  TEXT    NOT NULL,
+        lot_size         INTEGER NOT NULL,
+        tick_size        REAL    NOT NULL,
+        expiry           TEXT,
+        strike           REAL,
+        option_type      TEXT,
+        segment          TEXT,
         PRIMARY KEY (tradingsymbol, exchange)
     );
 ";
 
 const UPSERT: &str = "
     INSERT OR REPLACE INTO instruments
-        (tradingsymbol, exchange, instrument_type, lot_size, tick_size, expiry, strike, option_type)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
+        (instrument_token, tradingsymbol, name, exchange, instrument_type,
+         lot_size, tick_size, expiry, strike, option_type, segment)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
 ";
 
 const FIND: &str = "
-    SELECT tradingsymbol, exchange, instrument_type, lot_size, tick_size,
-           expiry, strike, option_type
+    SELECT instrument_token, tradingsymbol, name, exchange, instrument_type,
+           lot_size, tick_size, expiry, strike, option_type, segment
     FROM instruments
     WHERE tradingsymbol = ?1 AND exchange = ?2;
 ";
 
 const LIST_BY_EXCHANGE: &str = "
-    SELECT tradingsymbol, exchange, instrument_type, lot_size, tick_size,
-           expiry, strike, option_type
+    SELECT instrument_token, tradingsymbol, name, exchange, instrument_type,
+           lot_size, tick_size, expiry, strike, option_type, segment
     FROM instruments
     WHERE exchange = ?1;
 ";
@@ -87,18 +93,31 @@ pub struct InstrumentStore {
 
 impl InstrumentStore {
     /// Opens (or creates) a SQLite file at `path` and ensures the
-    /// `instruments` table exists.
+    /// `instruments` table exists with the latest schema.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(CREATE_TABLE)?;
+        Self::ensure_schema(&conn)?;
         Ok(Self { conn })
     }
 
     /// Creates an in-memory SQLite database (useful for tests).
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(CREATE_TABLE)?;
+        Self::ensure_schema(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Drop and recreate the instruments table to ensure the schema is current.
+    fn ensure_schema(conn: &Connection) -> Result<()> {
+        // Check if the table already has the new columns; if not, recreate.
+        let has_new_schema = conn
+            .prepare("SELECT instrument_token FROM instruments LIMIT 0")
+            .is_ok();
+        if !has_new_schema {
+            conn.execute_batch(DROP_TABLE)?;
+        }
+        conn.execute_batch(CREATE_TABLE)?;
+        Ok(())
     }
 
     /// INSERT OR REPLACE a batch of instruments.
@@ -108,7 +127,9 @@ impl InstrumentStore {
             let mut stmt = tx.prepare_cached(UPSERT)?;
             for inst in instruments {
                 stmt.execute(params![
+                    inst.instrument_token,
                     inst.tradingsymbol,
+                    inst.name,
                     exchange_to_str(inst.exchange),
                     instrument_type_to_str(inst.instrument_type),
                     inst.lot_size,
@@ -116,6 +137,7 @@ impl InstrumentStore {
                     inst.expiry,
                     inst.strike,
                     inst.option_type,
+                    inst.segment,
                 ])?;
             }
         }
@@ -131,6 +153,12 @@ impl InstrumentStore {
             Some(row) => Ok(Some(row_to_instrument(row)?)),
             None => Ok(None),
         }
+    }
+
+    /// Look up the instrument_token for a given symbol and exchange.
+    pub fn find_token(&self, symbol: &str, exchange: Exchange) -> Result<Option<String>> {
+        let inst = self.find(symbol, exchange)?;
+        Ok(inst.and_then(|i| i.instrument_token))
     }
 
     /// Return all instruments on a given exchange.
@@ -154,18 +182,21 @@ fn row_to_instrument_unchecked(row: &rusqlite::Row) -> Result<Instrument> {
 }
 
 fn row_to_instrument(row: &rusqlite::Row) -> Result<Instrument> {
-    let exchange_str: String = row.get(1)?;
-    let itype_str: String = row.get(2)?;
+    let exchange_str: String = row.get(3)?;
+    let itype_str: String = row.get(4)?;
 
     Ok(Instrument {
-        tradingsymbol: row.get(0)?,
+        instrument_token: row.get(0)?,
+        tradingsymbol: row.get(1)?,
+        name: row.get(2)?,
         exchange: str_to_exchange(&exchange_str)?,
         instrument_type: str_to_instrument_type(&itype_str)?,
-        lot_size: row.get(3)?,
-        tick_size: row.get(4)?,
-        expiry: row.get(5)?,
-        strike: row.get(6)?,
-        option_type: row.get(7)?,
+        lot_size: row.get(5)?,
+        tick_size: row.get(6)?,
+        expiry: row.get(7)?,
+        strike: row.get(8)?,
+        option_type: row.get(9)?,
+        segment: row.get(10)?,
     })
 }
 
@@ -179,7 +210,9 @@ mod tests {
     /// Helper: build a simple equity instrument for testing.
     fn make_equity(symbol: &str, exchange: Exchange) -> Instrument {
         Instrument {
+            instrument_token: None,
             tradingsymbol: symbol.to_string(),
+            name: None,
             exchange,
             instrument_type: InstrumentType::Equity,
             lot_size: 1,
@@ -187,6 +220,7 @@ mod tests {
             expiry: None,
             strike: None,
             option_type: None,
+            segment: None,
         }
     }
 
@@ -195,7 +229,9 @@ mod tests {
         let store = InstrumentStore::in_memory().expect("failed to create in-memory store");
 
         let inst = Instrument {
+            instrument_token: Some("11536386".to_string()),
             tradingsymbol: "NIFTY24APRFUT".to_string(),
+            name: Some("NIFTY".to_string()),
             exchange: Exchange::Nse,
             instrument_type: InstrumentType::FutureFO,
             lot_size: 50,
@@ -203,6 +239,7 @@ mod tests {
             expiry: Some("2024-04-25".to_string()),
             strike: None,
             option_type: None,
+            segment: Some("NFO-FUT".to_string()),
         };
 
         store.upsert(&[inst.clone()]).expect("upsert failed");

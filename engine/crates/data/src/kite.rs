@@ -125,12 +125,10 @@ impl KiteClient {
 /// segment, exchange
 #[derive(Debug, Deserialize)]
 struct CsvInstrumentRow {
-    #[allow(dead_code)]
     instrument_token: String,
     #[allow(dead_code)]
     exchange_token: String,
     tradingsymbol: String,
-    #[allow(dead_code)]
     name: String,
     #[allow(dead_code)]
     last_price: String,
@@ -139,7 +137,6 @@ struct CsvInstrumentRow {
     tick_size: String,
     lot_size: String,
     instrument_type: String,
-    #[allow(dead_code)]
     segment: String,
     exchange: String,
 }
@@ -194,7 +191,9 @@ pub fn parse_instruments_csv(csv_text: &str) -> Result<Vec<Instrument>> {
             .unwrap_or(0.05);
 
         instruments.push(Instrument {
+            instrument_token: Some(row.instrument_token),
             tradingsymbol: row.tradingsymbol,
+            name: if row.name.is_empty() { None } else { Some(row.name) },
             exchange,
             instrument_type,
             lot_size,
@@ -202,6 +201,7 @@ pub fn parse_instruments_csv(csv_text: &str) -> Result<Vec<Instrument>> {
             expiry,
             strike,
             option_type,
+            segment: if row.segment.is_empty() { None } else { Some(row.segment) },
         });
     }
 
