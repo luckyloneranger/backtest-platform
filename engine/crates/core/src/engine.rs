@@ -161,6 +161,8 @@ impl BacktestEngine {
 
         // 5. Index all intervals' bars by timestamp for O(1) lookup
         let mut bar_index: HashMap<String, HashMap<i64, Vec<Bar>>> = HashMap::new();
+        // For coarser intervals, keep sorted timestamp list for "most recent" lookup
+        let mut sorted_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
         for (interval, bars) in &bars_by_interval {
             let mut ts_map: HashMap<i64, Vec<Bar>> = HashMap::new();
             for bar in bars {
@@ -169,8 +171,15 @@ impl BacktestEngine {
                     .or_default()
                     .push(bar.clone());
             }
+            let mut ts_list: Vec<i64> = ts_map.keys().cloned().collect();
+            ts_list.sort();
+            sorted_timestamps.insert(interval.clone(), ts_list);
             bar_index.insert(interval.clone(), ts_map);
         }
+
+        // Track the last emitted coarser-interval timestamp per interval
+        // so we only emit a new bar when a new candle appears
+        let mut last_coarse_ts: HashMap<String, i64> = HashMap::new();
 
         // 6. Lookback buffers per (symbol, interval)
         let mut lookback: HashMap<(String, String), VecDeque<Bar>> = HashMap::new();
@@ -232,22 +241,58 @@ impl BacktestEngine {
             let mut timeframes: HashMap<String, HashMap<String, Bar>> = HashMap::new();
             for req in requirements {
                 if let Some(ts_map) = bar_index.get(&req.interval) {
-                    if let Some(bars_at_ts) = ts_map.get(timestamp) {
-                        let symbol_map: HashMap<String, Bar> = bars_at_ts
-                            .iter()
-                            .map(|b| (b.symbol.clone(), b.clone()))
-                            .collect();
-                        timeframes.insert(req.interval.clone(), symbol_map);
+                    // For the finest interval, exact match
+                    // For coarser intervals, find the most recent bar at or before this timestamp
+                    let matching_ts = if req.interval == finest_interval_str {
+                        // Exact match for finest
+                        if ts_map.contains_key(timestamp) {
+                            Some(*timestamp)
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Binary search for most recent coarser bar <= current timestamp
+                        if let Some(ts_list) = sorted_timestamps.get(&req.interval) {
+                            match ts_list.binary_search(timestamp) {
+                                Ok(idx) => Some(ts_list[idx]),
+                                Err(idx) if idx > 0 => Some(ts_list[idx - 1]),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    };
 
-                        // Update lookback for this interval
-                        for bar in bars_at_ts {
-                            let key = (bar.symbol.clone(), req.interval.clone());
-                            let max_len =
-                                lookback_sizes.get(&req.interval).copied().unwrap_or(200);
-                            let buf = lookback.entry(key).or_insert_with(VecDeque::new);
-                            buf.push_back(bar.clone());
-                            if buf.len() > max_len {
-                                buf.pop_front();
+                    if let Some(bar_ts) = matching_ts {
+                        // Only emit if this is a NEW bar we haven't sent before
+                        let prev_ts = last_coarse_ts.get(&req.interval).copied();
+                        let is_new = prev_ts.map_or(true, |prev| bar_ts > prev);
+
+                        if is_new || req.interval == finest_interval_str {
+                            if let Some(bars_at_ts) = ts_map.get(&bar_ts) {
+                                let symbol_map: HashMap<String, Bar> = bars_at_ts
+                                    .iter()
+                                    .map(|b| (b.symbol.clone(), b.clone()))
+                                    .collect();
+                                timeframes.insert(req.interval.clone(), symbol_map);
+
+                                // Update lookback for this interval
+                                if is_new {
+                                    last_coarse_ts.insert(req.interval.clone(), bar_ts);
+                                    for bar in bars_at_ts {
+                                        let key = (bar.symbol.clone(), req.interval.clone());
+                                        let max_len = lookback_sizes
+                                            .get(&req.interval)
+                                            .copied()
+                                            .unwrap_or(200);
+                                        let buf =
+                                            lookback.entry(key).or_insert_with(VecDeque::new);
+                                        buf.push_back(bar.clone());
+                                        if buf.len() > max_len {
+                                            buf.pop_front();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
