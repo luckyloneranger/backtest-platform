@@ -663,4 +663,220 @@ mod tests {
         // With 50K margin, the 100K trade should be blocked
         assert!(result.trades.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_margin_check_does_not_block_sells() {
+        // Strategy that buys on bar 2, then sells on bar 5.
+        // With tight margin, the sell should NOT be blocked even though margin is full.
+        struct BuySellStrategy {
+            call_count: AtomicUsize,
+        }
+
+        impl BuySellStrategy {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl StrategyClient for BuySellStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "minute".into(),
+                    lookback: 200,
+                }])
+            }
+            async fn initialize(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: &[InstrumentData],
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot
+                    .timeframes
+                    .values()
+                    .next()
+                    .and_then(|m| m.keys().next().cloned())
+                    .unwrap_or_default();
+                if count == 2 {
+                    // Buy 100 shares — this will use up margin
+                    Ok(vec![Signal::market_buy(&symbol, 100)])
+                } else if count == 5 {
+                    // Sell 100 shares — should NOT be blocked by margin
+                    Ok(vec![Signal::market_sell(&symbol, 100)])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| Bar {
+                timestamp_ms: i * 60000,
+                symbol: "TEST".into(),
+                open: 100.0,
+                high: 102.0,
+                low: 99.0,
+                close: 101.0,
+                volume: 1000,
+                oi: 0,
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "minute".into(),
+            lookback: 200,
+        }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "buy_sell".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                // Set margin to allow the buy (100 * 101 = 10100) but would block another buy
+                margin_available: Some(11_000.0),
+                lookback_window: 200,
+            },
+            bars_by_interval,
+            &BuySellStrategy::new(),
+            vec![],
+            &requirements,
+        )
+        .await
+        .unwrap();
+
+        // The sell should have gone through (not margin-blocked), producing a closed trade
+        assert_eq!(
+            result.trades.len(),
+            1,
+            "sell should not be blocked by margin check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_margin_check_uses_correct_symbol_price() {
+        // Strategy that tries to buy EXPENSIVE on bar 2.
+        // We have two symbols: CHEAP (close=10) and EXPENSIVE (close=500).
+        // Margin is 1000. If the engine incorrectly uses the first bar's price (CHEAP=10),
+        // it would allow the buy. Correct behavior uses EXPENSIVE=500 and blocks it.
+        struct MultiSymbolBuyStrategy {
+            call_count: AtomicUsize,
+        }
+
+        impl MultiSymbolBuyStrategy {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl StrategyClient for MultiSymbolBuyStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement {
+                    interval: "minute".into(),
+                    lookback: 200,
+                }])
+            }
+            async fn initialize(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: &[InstrumentData],
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn on_bar(&self, _snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 2 {
+                    // Try to buy 10 shares of EXPENSIVE at ~500 = 5000 > margin 1000
+                    Ok(vec![Signal::market_buy("EXPENSIVE", 10)])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        // Create bars for both symbols at same timestamps
+        let mut bars: Vec<Bar> = Vec::new();
+        for i in 0..5i64 {
+            bars.push(Bar {
+                timestamp_ms: i * 60000,
+                symbol: "CHEAP".into(),
+                open: 10.0,
+                high: 12.0,
+                low: 9.0,
+                close: 10.0,
+                volume: 1000,
+                oi: 0,
+            });
+            bars.push(Bar {
+                timestamp_ms: i * 60000,
+                symbol: "EXPENSIVE".into(),
+                open: 500.0,
+                high: 520.0,
+                low: 490.0,
+                close: 500.0,
+                volume: 1000,
+                oi: 0,
+            });
+        }
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement {
+            interval: "minute".into(),
+            lookback: 200,
+        }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "multi_sym".into(),
+                symbols: vec!["CHEAP".into(), "EXPENSIVE".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                // Margin 1000: 10 * 500 = 5000 should be blocked
+                margin_available: Some(1_000.0),
+                lookback_window: 200,
+            },
+            bars_by_interval,
+            &MultiSymbolBuyStrategy::new(),
+            vec![],
+            &requirements,
+        )
+        .await
+        .unwrap();
+
+        // The buy for EXPENSIVE should have been margin-rejected
+        assert!(
+            result.trades.is_empty(),
+            "buy for EXPENSIVE should be blocked — margin uses correct symbol price"
+        );
+    }
 }

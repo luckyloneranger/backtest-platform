@@ -16,7 +16,7 @@ pub struct ClosedTrade {
     pub exit_price: f64,
     pub entry_timestamp_ms: i64,
     pub exit_timestamp_ms: i64,
-    pub pnl: f64,   // (exit - entry) * qty for long, (entry - exit) * qty for short
+    pub pnl: f64,   // net P&L after costs: (exit - entry) * qty - total_costs
     pub costs: f64,  // total transaction costs for this round-trip
 }
 
@@ -118,57 +118,76 @@ impl PortfolioManager {
     }
 
     fn apply_sell(&mut self, fill: &Fill, costs: f64) {
-        self.cash += fill.quantity as f64 * fill.fill_price - costs;
-
-        let should_remove = if let Some(pos) = self.positions.get_mut(&fill.symbol) {
-            if fill.quantity >= pos.quantity {
-                // Full close
-                let closed_qty = pos.quantity;
-                let pnl =
-                    (fill.fill_price - pos.avg_price) * closed_qty as f64;
-                let total_costs = pos.total_costs + costs;
-
-                self.closed_trades.push(ClosedTrade {
-                    symbol: fill.symbol.clone(),
-                    side: "BUY".to_string(),
-                    quantity: closed_qty,
-                    entry_price: pos.avg_price,
-                    exit_price: fill.fill_price,
-                    entry_timestamp_ms: pos.entry_timestamp_ms,
-                    exit_timestamp_ms: fill.timestamp_ms,
-                    pnl,
-                    costs: total_costs,
-                });
-                true
-            } else {
-                // Partial close
-                let closed_qty = fill.quantity;
-                let pnl =
-                    (fill.fill_price - pos.avg_price) * closed_qty as f64;
-                // Allocate costs proportionally
-                let entry_cost_portion =
-                    pos.total_costs * (closed_qty as f64 / pos.quantity as f64);
-                let total_costs = entry_cost_portion + costs;
-
-                self.closed_trades.push(ClosedTrade {
-                    symbol: fill.symbol.clone(),
-                    side: "BUY".to_string(),
-                    quantity: closed_qty,
-                    entry_price: pos.avg_price,
-                    exit_price: fill.fill_price,
-                    entry_timestamp_ms: pos.entry_timestamp_ms,
-                    exit_timestamp_ms: fill.timestamp_ms,
-                    pnl,
-                    costs: total_costs,
-                });
-
-                pos.total_costs -= entry_cost_portion;
-                pos.quantity -= closed_qty;
-                false
+        // Bug 6 fix: check if position exists BEFORE modifying cash.
+        // If no position exists, log warning and return early — no phantom cash.
+        let pos = match self.positions.get_mut(&fill.symbol) {
+            Some(pos) => pos,
+            None => {
+                eprintln!(
+                    "WARNING: sell for {} ignored — no open position",
+                    fill.symbol
+                );
+                return;
             }
+        };
+
+        // Bug 5 fix: clamp effective quantity to position size to prevent overselling.
+        let effective_qty = fill.quantity.min(pos.quantity);
+        if effective_qty < fill.quantity {
+            eprintln!(
+                "WARNING: sell qty {} for {} clamped to position qty {}",
+                fill.quantity, fill.symbol, pos.quantity
+            );
+        }
+
+        // Credit cash only for the effective (clamped) quantity
+        self.cash += effective_qty as f64 * fill.fill_price - costs;
+
+        let should_remove = if effective_qty >= pos.quantity {
+            // Full close
+            let closed_qty = pos.quantity;
+            let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
+            let total_costs = pos.total_costs + costs;
+            // Bug 7 fix: pnl is net of costs
+            let pnl = gross_pnl - total_costs;
+
+            self.closed_trades.push(ClosedTrade {
+                symbol: fill.symbol.clone(),
+                side: "BUY".to_string(),
+                quantity: closed_qty,
+                entry_price: pos.avg_price,
+                exit_price: fill.fill_price,
+                entry_timestamp_ms: pos.entry_timestamp_ms,
+                exit_timestamp_ms: fill.timestamp_ms,
+                pnl,
+                costs: total_costs,
+            });
+            true
         } else {
-            // Selling without a position — open short (not fully modeled yet,
-            // but handle gracefully)
+            // Partial close
+            let closed_qty = effective_qty;
+            let gross_pnl = (fill.fill_price - pos.avg_price) * closed_qty as f64;
+            // Allocate costs proportionally
+            let entry_cost_portion =
+                pos.total_costs * (closed_qty as f64 / pos.quantity as f64);
+            let total_costs = entry_cost_portion + costs;
+            // Bug 7 fix: pnl is net of costs
+            let pnl = gross_pnl - total_costs;
+
+            self.closed_trades.push(ClosedTrade {
+                symbol: fill.symbol.clone(),
+                side: "BUY".to_string(),
+                quantity: closed_qty,
+                entry_price: pos.avg_price,
+                exit_price: fill.fill_price,
+                entry_timestamp_ms: pos.entry_timestamp_ms,
+                exit_timestamp_ms: fill.timestamp_ms,
+                pnl,
+                costs: total_costs,
+            });
+
+            pos.total_costs -= entry_cost_portion;
+            pos.quantity -= closed_qty;
             false
         };
 
@@ -306,8 +325,8 @@ mod tests {
         assert_eq!(trade.quantity, 10);
         assert!((trade.entry_price - 2500.0).abs() < f64::EPSILON);
         assert!((trade.exit_price - 2600.0).abs() < f64::EPSILON);
-        // pnl = (2600 - 2500) * 10 = 1000
-        assert!((trade.pnl - 1000.0).abs() < f64::EPSILON);
+        // pnl = (2600 - 2500) * 10 - (50 buy costs + 50 sell costs) = 1000 - 100 = 900 (net)
+        assert!((trade.pnl - 900.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -410,5 +429,66 @@ mod tests {
         assert_eq!(trade.symbol, "");
         assert_eq!(trade.quantity, 0);
         assert!((trade.pnl - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_sell_without_position_is_rejected() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Try to sell without any position — should be ignored
+        pm.apply_fill(&sell_fill("RELIANCE", 10, 2600.0, 1_000), 50.0);
+
+        // Cash should be unchanged (sell was rejected)
+        assert!((pm.cash() - 1_000_000.0).abs() < f64::EPSILON);
+        // No closed trades
+        assert!(pm.closed_trades().is_empty());
+        // No position created
+        assert!(pm.position("RELIANCE").is_none());
+    }
+
+    #[test]
+    fn test_oversell_clamped_to_position_qty() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Buy 5 at 2500
+        pm.apply_fill(&buy_fill("RELIANCE", 5, 2500.0, 1_000), 0.0);
+
+        // Try to sell 10 (more than held) — should be clamped to 5
+        pm.apply_fill(&sell_fill("RELIANCE", 10, 2600.0, 2_000), 0.0);
+
+        // Position should be fully closed
+        assert!(pm.position("RELIANCE").is_none());
+
+        // Closed trade should have quantity = 5 (clamped), not 10
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].quantity, 5);
+
+        // Cash should reflect only 5 shares sold, not 10
+        // Initial: 1_000_000
+        // After buy: 1_000_000 - 5*2500 = 987_500
+        // After sell 5 at 2600: 987_500 + 5*2600 = 1_000_500
+        assert!((pm.cash() - 1_000_500.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_trade_pnl_is_net_of_costs() {
+        let mut pm = PortfolioManager::new(1_000_000.0);
+
+        // Buy 10 at 2500 with costs=100
+        pm.apply_fill(&buy_fill("RELIANCE", 10, 2500.0, 1_000), 100.0);
+
+        // Sell 10 at 2600 with costs=100
+        pm.apply_fill(&sell_fill("RELIANCE", 10, 2600.0, 2_000), 100.0);
+
+        let trades = pm.closed_trades();
+        assert_eq!(trades.len(), 1);
+
+        let trade = &trades[0];
+        // gross_pnl = (2600 - 2500) * 10 = 1000
+        // total_costs = 100 (buy) + 100 (sell) = 200
+        // net_pnl = 1000 - 200 = 800
+        assert!((trade.pnl - 800.0).abs() < f64::EPSILON);
+        assert!((trade.costs - 200.0).abs() < f64::EPSILON);
     }
 }
