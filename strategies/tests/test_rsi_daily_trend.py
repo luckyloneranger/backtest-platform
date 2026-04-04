@@ -1,7 +1,7 @@
 """Tests for RSI + Daily EMA Trend strategy."""
 
 from strategies.base import (
-    BarData, MarketSnapshot, Portfolio, SessionContext, InstrumentInfo, Signal,
+    BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo, Signal,
 )
 from strategies.examples.rsi_daily_trend import RsiDailyTrend, compute_rsi, compute_ema
 
@@ -13,6 +13,8 @@ def make_snapshot(
     close_15m: float | None = None,
     close_day: float | None = None,
     symbol: str = "TEST",
+    cash: float = 100_000.0,
+    positions: list[Position] | None = None,
 ) -> MarketSnapshot:
     timeframes = {}
     if close_15m is not None:
@@ -21,11 +23,13 @@ def make_snapshot(
     if close_day is not None:
         bar = BarData(symbol, close_day, close_day + 1, close_day - 1, close_day, 50000, 0)
         timeframes["day"] = {symbol: bar}
+    pos_list = positions if positions is not None else []
+    equity = cash + sum(p.quantity * p.avg_price for p in pos_list)
     return MarketSnapshot(
         timestamp_ms=ts,
         timeframes=timeframes,
         history={},
-        portfolio=Portfolio(cash=100_000.0, equity=100_000.0, positions=[]),
+        portfolio=Portfolio(cash=cash, equity=equity, positions=pos_list),
         instruments={},
         fills=[],
         rejections=[],
@@ -133,11 +137,12 @@ def test_sell_on_rsi_overbought():
     for i, p in enumerate(prices_down):
         s.on_bar(make_snapshot(100 + i, close_15m=float(p)))
 
-    # Now rise to trigger overbought sell
+    # Now rise to trigger overbought sell — include a position so sell has quantity
     prices_up = [92, 95, 100, 105, 110, 115, 120, 125, 130, 135]
+    held = Position(symbol="TEST", quantity=200, avg_price=90.0, unrealized_pnl=0.0)
     all_signals = []
     for i, p in enumerate(prices_up):
-        signals = s.on_bar(make_snapshot(200 + i, close_15m=float(p)))
+        signals = s.on_bar(make_snapshot(200 + i, close_15m=float(p), positions=[held]))
         all_signals.extend(signals)
 
     assert any(sig.action == "SELL" for sig in all_signals)
@@ -154,8 +159,9 @@ def test_required_data():
 
 def test_on_complete_returns_metadata():
     s = RsiDailyTrend()
-    s.initialize({"rsi_period": 14, "ema_period": 20}, {})
+    s.initialize({"rsi_period": 14, "ema_period": 20, "risk_pct": 0.15}, {})
     result = s.on_complete()
     assert result["strategy_type"] == "rsi_daily_trend"
     assert result["rsi_period"] == 14
     assert result["ema_period"] == 20
+    assert result["risk_pct"] == 0.15

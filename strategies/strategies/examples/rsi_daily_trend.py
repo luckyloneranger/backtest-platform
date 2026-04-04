@@ -7,14 +7,14 @@ Multi-timeframe strategy that uses:
 Rules:
 - Only BUY when daily EMA trend is UP and 15-min RSI drops below oversold level
 - Only SELL when 15-min RSI rises above overbought level, or daily trend reverses
-- Position sizing: 1 unit per signal (configurable via quantity param)
+- Position sizing: allocate a configurable % of available capital per trade
 
 Config params:
 - rsi_period: RSI lookback period (default 14)
 - rsi_oversold: RSI level to trigger buy (default 30)
 - rsi_overbought: RSI level to trigger sell (default 70)
 - ema_period: Daily EMA period for trend (default 20)
-- quantity: Shares per trade (default 1)
+- risk_pct: fraction of available capital to allocate per trade (default 0.2 = 20%)
 """
 
 from collections import deque
@@ -82,7 +82,8 @@ class RsiDailyTrend(Strategy):
         self.rsi_oversold = config.get("rsi_oversold", 30)
         self.rsi_overbought = config.get("rsi_overbought", 70)
         self.ema_period = config.get("ema_period", 20)
-        self.quantity = config.get("quantity", 1)
+        self.risk_pct = config.get("risk_pct", 0.2)  # 20% of capital per trade
+        self.instruments = instruments
 
         # Per-symbol state
         self.prices_15m: dict[str, deque[float]] = {}
@@ -135,10 +136,20 @@ class RsiDailyTrend(Strategy):
                 and prev >= self.rsi_oversold
                 and rsi < self.rsi_oversold
             ):
-                signals.append(Signal(
-                    action="BUY", symbol=symbol, quantity=self.quantity,
-                ))
-                self.in_position[symbol] = True
+                # Dynamic position sizing: allocate risk_pct of available cash
+                allocation = snapshot.portfolio.cash * self.risk_pct
+                qty = int(allocation / bar.close)
+
+                # Round to lot size if instrument metadata available
+                inst = self.instruments.get(symbol)
+                if inst and inst.lot_size > 1:
+                    qty = (qty // inst.lot_size) * inst.lot_size
+
+                if qty > 0:
+                    signals.append(Signal(
+                        action="BUY", symbol=symbol, quantity=qty,
+                    ))
+                    self.in_position[symbol] = True
 
             # --- Exit: RSI crosses above overbought OR daily trend reverses ---
             elif self.in_position[symbol]:
@@ -153,9 +164,17 @@ class RsiDailyTrend(Strategy):
                     should_exit = True
 
                 if should_exit:
-                    signals.append(Signal(
-                        action="SELL", symbol=symbol, quantity=self.quantity,
-                    ))
+                    # Sell entire position
+                    held_qty = 0
+                    for pos in snapshot.portfolio.positions:
+                        if pos.symbol == symbol:
+                            held_qty = pos.quantity
+                            break
+
+                    if held_qty > 0:
+                        signals.append(Signal(
+                            action="SELL", symbol=symbol, quantity=held_qty,
+                        ))
                     self.in_position[symbol] = False
 
             self.prev_rsi[symbol] = rsi
@@ -167,4 +186,5 @@ class RsiDailyTrend(Strategy):
             "strategy_type": "rsi_daily_trend",
             "rsi_period": self.rsi_period,
             "ema_period": self.ema_period,
+            "risk_pct": self.risk_pct,
         }
