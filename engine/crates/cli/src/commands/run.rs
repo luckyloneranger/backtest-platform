@@ -130,8 +130,15 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         let req_interval = parse_interval(&req.interval)?;
         let mut interval_bars = Vec::new();
 
+        // Extend from_ms backwards to include lookback warmup bars.
+        // Convert lookback bars to calendar days, add 50% margin for weekends/holidays.
+        let bars_per_day = req_interval.bars_per_day().max(1) as i64;
+        let lookback_days = ((req.lookback as i64 / bars_per_day) + 1) * 3 / 2; // +50% margin
+        let lookback_ms = lookback_days * 86_400_000;
+        let adjusted_from_ms = from_ms - lookback_ms;
+
         for symbol in &args.symbols {
-            let bars = store.read(&args.exchange, symbol, req_interval, Some(from_ms), Some(to_ms))?;
+            let bars = store.read(&args.exchange, symbol, req_interval, Some(adjusted_from_ms), Some(to_ms))?;
             if bars.is_empty() {
                 eprintln!(
                     "Warning: no data found for {} (interval={}). Run 'backtest data fetch' or 'backtest data generate-test-data' first.",
