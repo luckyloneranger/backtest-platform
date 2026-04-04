@@ -14,3 +14,6 @@ reqwest = { version = "0.12", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 arrow = "54"
 parquet = { version = "54", features = ["arrow"] }
+
+[dev-dependencies]
+tempfile = "3"
