@@ -44,9 +44,9 @@ class SmaCrossover(Strategy):
 
                 if self.prev_fast_above[symbol] is not None:
                     if fast_above and not self.prev_fast_above[symbol]:
-                        signals.append(Signal(action="BUY", symbol=symbol, quantity=1))
+                        signals.append(Signal(action="BUY", symbol=symbol, quantity=1, product_type="CNC"))
                     elif not fast_above and self.prev_fast_above[symbol]:
-                        signals.append(Signal(action="SELL", symbol=symbol, quantity=1))
+                        signals.append(Signal(action="SELL", symbol=symbol, quantity=1, product_type="CNC"))
 
                 self.prev_fast_above[symbol] = fast_above
 

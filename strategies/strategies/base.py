@@ -91,6 +91,7 @@ class Signal:
     order_type: str = "MARKET"    # "MARKET", "LIMIT", "SL", "SL_M"
     limit_price: float = 0.0
     stop_price: float = 0.0
+    product_type: str = "CNC"     # "CNC" (delivery), "MIS" (intraday), "NRML" (F&O)
 
 
 @dataclass
