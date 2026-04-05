@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 
 from server.registry import register
 from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal, Position
-from strategies.indicators import compute_sma, compute_atr
 
 
 @dataclass
@@ -25,6 +24,11 @@ class SymbolState:
     pyramid_count: int = 0
     original_qty: int = 0
     bars_in_position: int = 0
+    pending_entry: bool = False       # limit entry order outstanding
+    pending_side: str = ""            # "BUY" or "SELL" — direction of pending entry
+    pending_qty: int = 0              # quantity of pending entry order
+    has_engine_stop: bool = False     # SL-M stop in engine
+    product_type: str = "CNC"        # "CNC" or "MIS" — set at entry time
 
 
 @register("sma_crossover")
@@ -33,11 +37,14 @@ class SmaCrossover(Strategy):
     trailing stops, time stops, and pyramiding. Supports both long and short positions.
 
     Long entry: golden cross (fast SMA > slow SMA) with minimum trend spread.
-    Long exit: death cross, trailing stop, or time stop.
+    Long exit: death cross, trailing stop (engine SL-M), or time stop.
     Short entry: death cross (fast SMA < slow SMA) with minimum trend spread.
-    Short exit: golden cross, trailing stop, or time stop.
+    Short exit: golden cross, trailing stop (engine SL-M), or time stop.
     Pyramiding: add to winning positions when price moves ATR beyond avg_entry.
     Position tracking: positive position_qty = long, negative = short.
+
+    Entry orders use LIMIT at bar.close. Stop-losses use engine SL-M orders.
+    Product type (CNC/MIS) is dynamically chosen based on trend spread.
     """
 
     def required_data(self) -> list[dict]:
@@ -57,6 +64,7 @@ class SmaCrossover(Strategy):
         self.min_spread: float = config.get("min_spread", 0.005)
         self.max_hold_bars: int = config.get("max_hold_bars", 50)
         self.pyramid_levels: int = config.get("pyramid_levels", 2)
+        self.cnc_spread_threshold: float = config.get("cnc_spread_threshold", 0.01)
 
         self.states: dict[str, SymbolState] = {}
         self.bar_count: int = 0
@@ -83,7 +91,7 @@ class SmaCrossover(Strategy):
                 break
 
         if actual_qty == 0 and state.position_qty != 0:
-            # Position was closed externally (e.g. by engine)
+            # Position was closed externally (e.g. by engine stop, auto-squareoff)
             state.position_qty = 0
             state.pyramid_count = 0
             state.original_qty = 0
@@ -93,6 +101,7 @@ class SmaCrossover(Strategy):
             state.lowest_since_entry = 0.0
             state.trailing_stop = 0.0
             state.bars_in_position = 0
+            state.has_engine_stop = False
 
         if actual_qty != 0:
             state.position_qty = actual_qty
@@ -105,6 +114,22 @@ class SmaCrossover(Strategy):
         if stop_distance <= 0:
             return 0
         return int(risk_amount / stop_distance)
+
+    def _reset_state(self, state: SymbolState) -> None:
+        """Reset all position-related state fields."""
+        state.position_qty = 0
+        state.pyramid_count = 0
+        state.original_qty = 0
+        state.entry_price = 0.0
+        state.avg_entry = 0.0
+        state.highest_since_entry = 0.0
+        state.lowest_since_entry = 0.0
+        state.trailing_stop = 0.0
+        state.bars_in_position = 0
+        state.has_engine_stop = False
+        state.pending_entry = False
+        state.pending_side = ""
+        state.pending_qty = 0
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
         signals: list[Signal] = []
@@ -121,6 +146,8 @@ class SmaCrossover(Strategy):
                 state.daily_closes.append(bar.close)
 
                 # 2. Compute indicators
+                from strategies.indicators import compute_sma, compute_atr
+
                 prices_list = list(state.prices)
                 fast_sma = compute_sma(prices_list, self.fast_period)
                 slow_sma = compute_sma(prices_list, self.slow_period)
@@ -140,7 +167,16 @@ class SmaCrossover(Strategy):
                 # 4. Reconcile position with portfolio
                 self._reconcile_position(state, snapshot.portfolio.positions, symbol)
 
-                # 5. If FLAT: check for long entry (golden cross) or short entry (death cross)
+                # 5. Handle pending entry orders
+                if state.pending_entry:
+                    self._handle_pending_entry(
+                        state, symbol, bar, snapshot, signals,
+                        fast_above, fast_sma, slow_sma, atr,
+                    )
+                    state.prev_fast_above = fast_above
+                    continue
+
+                # 6. If FLAT: check for long entry (golden cross) or short entry (death cross)
                 if state.position_qty == 0:
                     if (
                         state.prev_fast_above is not None
@@ -152,24 +188,21 @@ class SmaCrossover(Strategy):
                         if spread > self.min_spread and atr > 0:
                             qty = self._compute_qty(snapshot.context.initial_capital, atr)
                             if qty > 0:
+                                product = "CNC" if spread > self.cnc_spread_threshold else "MIS"
                                 signals.append(
                                     Signal(
                                         action="BUY",
                                         symbol=symbol,
                                         quantity=qty,
-                                        product_type="CNC",
+                                        order_type="LIMIT",
+                                        limit_price=bar.close,
+                                        product_type=product,
                                     )
                                 )
-                                state.entry_price = bar.close
-                                state.avg_entry = bar.close
-                                state.entry_bar = self.bar_count
-                                state.highest_since_entry = bar.close
-                                state.lowest_since_entry = 0.0
-                                state.trailing_stop = bar.close - atr * self.atr_stop_multiplier
-                                state.position_qty = qty
-                                state.original_qty = qty
-                                state.pyramid_count = 0
-                                state.bars_in_position = 0
+                                state.pending_entry = True
+                                state.pending_side = "BUY"
+                                state.pending_qty = qty
+                                state.product_type = product
 
                     elif (
                         state.prev_fast_above is not None
@@ -181,27 +214,35 @@ class SmaCrossover(Strategy):
                         if spread > self.min_spread and atr > 0:
                             qty = self._compute_qty(snapshot.context.initial_capital, atr)
                             if qty > 0:
+                                product = "CNC" if spread > self.cnc_spread_threshold else "MIS"
                                 signals.append(
                                     Signal(
                                         action="SELL",
                                         symbol=symbol,
                                         quantity=qty,
-                                        product_type="CNC",
+                                        order_type="LIMIT",
+                                        limit_price=bar.close,
+                                        product_type=product,
                                     )
                                 )
-                                state.entry_price = bar.close
-                                state.avg_entry = bar.close
-                                state.entry_bar = self.bar_count
-                                state.highest_since_entry = 0.0
-                                state.lowest_since_entry = bar.close
-                                state.trailing_stop = bar.close + atr * self.atr_stop_multiplier
-                                state.position_qty = -qty  # negative = short
-                                state.original_qty = qty
-                                state.pyramid_count = 0
-                                state.bars_in_position = 0
+                                state.pending_entry = True
+                                state.pending_side = "SELL"
+                                state.pending_qty = qty
+                                state.product_type = product
 
-                # 6. If LONG: check exits, then pyramiding
+                # 7. If LONG: check stop hit, exits, then pyramiding
                 elif state.position_qty > 0:
+                    # Check for engine stop hit first
+                    if state.has_engine_stop:
+                        stop_hit = any(
+                            f.symbol == symbol and f.side == "SELL"
+                            for f in snapshot.fills
+                        )
+                        if stop_hit:
+                            self._reset_state(state)
+                            state.prev_fast_above = fast_above
+                            continue
+
                     state.bars_in_position += 1
 
                     # Update trailing stop (only moves up)
@@ -210,40 +251,43 @@ class SmaCrossover(Strategy):
                     new_stop = state.highest_since_entry - atr * self.atr_stop_multiplier
                     if new_stop > state.trailing_stop:
                         state.trailing_stop = new_stop
+                        # Ratchet engine stop
+                        if state.has_engine_stop:
+                            signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                            signals.append(
+                                Signal(
+                                    action="SELL",
+                                    symbol=symbol,
+                                    quantity=state.position_qty,
+                                    order_type="SL_M",
+                                    stop_price=state.trailing_stop,
+                                    product_type=state.product_type,
+                                )
+                            )
 
                     sell_all = False
                     # a. Death cross exit
                     if state.prev_fast_above is not None and not fast_above and state.prev_fast_above:
                         sell_all = True
 
-                    # b. Trailing stop exit
-                    if not sell_all and bar.close < state.trailing_stop:
-                        sell_all = True
-
-                    # c. Time stop exit
+                    # b. Time stop exit
                     if not sell_all and state.bars_in_position > self.max_hold_bars:
                         gain = (bar.close - state.avg_entry) / state.avg_entry if state.avg_entry > 0 else 0.0
                         if gain < 0.005:
                             sell_all = True
 
                     if sell_all:
+                        # Cancel all pending orders (including engine stop) before exit
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
                         signals.append(
                             Signal(
                                 action="SELL",
                                 symbol=symbol,
                                 quantity=state.position_qty,
-                                product_type="CNC",
+                                product_type=state.product_type,
                             )
                         )
-                        state.position_qty = 0
-                        state.pyramid_count = 0
-                        state.original_qty = 0
-                        state.entry_price = 0.0
-                        state.avg_entry = 0.0
-                        state.highest_since_entry = 0.0
-                        state.lowest_since_entry = 0.0
-                        state.trailing_stop = 0.0
-                        state.bars_in_position = 0
+                        self._reset_state(state)
                     else:
                         # Check pyramid opportunity
                         if (
@@ -257,19 +301,42 @@ class SmaCrossover(Strategy):
                                     action="BUY",
                                     symbol=symbol,
                                     quantity=add_qty,
-                                    product_type="CNC",
+                                    product_type=state.product_type,
                                 )
                             )
-                            # Update average entry
+                            # Cancel and resubmit engine stop with updated qty
                             total_qty = state.position_qty + add_qty
                             state.avg_entry = (
                                 (state.avg_entry * state.position_qty + bar.close * add_qty) / total_qty
                             )
                             state.position_qty = total_qty
                             state.pyramid_count += 1
+                            if state.has_engine_stop:
+                                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                                signals.append(
+                                    Signal(
+                                        action="SELL",
+                                        symbol=symbol,
+                                        quantity=state.position_qty,
+                                        order_type="SL_M",
+                                        stop_price=state.trailing_stop,
+                                        product_type=state.product_type,
+                                    )
+                                )
 
-                # 7. If SHORT: check exits, then pyramiding (mirror of long logic)
+                # 8. If SHORT: check stop hit, exits, then pyramiding (mirror of long logic)
                 elif state.position_qty < 0:
+                    # Check for engine stop hit first
+                    if state.has_engine_stop:
+                        stop_hit = any(
+                            f.symbol == symbol and f.side == "BUY"
+                            for f in snapshot.fills
+                        )
+                        if stop_hit:
+                            self._reset_state(state)
+                            state.prev_fast_above = fast_above
+                            continue
+
                     state.bars_in_position += 1
                     abs_qty = abs(state.position_qty)
 
@@ -279,40 +346,43 @@ class SmaCrossover(Strategy):
                     new_stop = state.lowest_since_entry + atr * self.atr_stop_multiplier
                     if new_stop < state.trailing_stop:
                         state.trailing_stop = new_stop
+                        # Ratchet engine stop
+                        if state.has_engine_stop:
+                            signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                            signals.append(
+                                Signal(
+                                    action="BUY",
+                                    symbol=symbol,
+                                    quantity=abs_qty,
+                                    order_type="SL_M",
+                                    stop_price=state.trailing_stop,
+                                    product_type=state.product_type,
+                                )
+                            )
 
                     cover_all = False
                     # a. Golden cross exit (opposite crossover)
                     if state.prev_fast_above is not None and fast_above and not state.prev_fast_above:
                         cover_all = True
 
-                    # b. Trailing stop exit (price rises above trailing stop)
-                    if not cover_all and bar.close > state.trailing_stop:
-                        cover_all = True
-
-                    # c. Time stop exit
+                    # b. Time stop exit
                     if not cover_all and state.bars_in_position > self.max_hold_bars:
                         gain = (state.avg_entry - bar.close) / state.avg_entry if state.avg_entry > 0 else 0.0
                         if gain < 0.005:
                             cover_all = True
 
                     if cover_all:
+                        # Cancel all pending orders (including engine stop) before exit
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
                         signals.append(
                             Signal(
                                 action="BUY",
                                 symbol=symbol,
                                 quantity=abs_qty,
-                                product_type="CNC",
+                                product_type=state.product_type,
                             )
                         )
-                        state.position_qty = 0
-                        state.pyramid_count = 0
-                        state.original_qty = 0
-                        state.entry_price = 0.0
-                        state.avg_entry = 0.0
-                        state.highest_since_entry = 0.0
-                        state.lowest_since_entry = 0.0
-                        state.trailing_stop = 0.0
-                        state.bars_in_position = 0
+                        self._reset_state(state)
                     else:
                         # Check short pyramid opportunity (price drops below avg_entry - ATR)
                         if (
@@ -326,18 +396,153 @@ class SmaCrossover(Strategy):
                                     action="SELL",
                                     symbol=symbol,
                                     quantity=add_qty,
-                                    product_type="CNC",
+                                    product_type=state.product_type,
                                 )
                             )
-                            # Update average entry for short
+                            # Cancel and resubmit engine stop with updated qty
                             total_abs = abs_qty + add_qty
                             state.avg_entry = (
                                 (state.avg_entry * abs_qty + bar.close * add_qty) / total_abs
                             )
                             state.position_qty = -(total_abs)
                             state.pyramid_count += 1
+                            if state.has_engine_stop:
+                                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                                signals.append(
+                                    Signal(
+                                        action="BUY",
+                                        symbol=symbol,
+                                        quantity=abs(state.position_qty),
+                                        order_type="SL_M",
+                                        stop_price=state.trailing_stop,
+                                        product_type=state.product_type,
+                                    )
+                                )
 
-                # 8. Update crossover state
+                # 9. Update crossover state
                 state.prev_fast_above = fast_above
 
         return signals
+
+    def _handle_pending_entry(
+        self,
+        state: SymbolState,
+        symbol: str,
+        bar,
+        snapshot: MarketSnapshot,
+        signals: list[Signal],
+        fast_above: bool,
+        fast_sma: float,
+        slow_sma: float,
+        atr: float,
+    ) -> None:
+        """Handle a pending limit entry order — check fills, cancel, or update."""
+        if state.pending_side == "BUY":
+            # Check if long entry filled
+            filled = any(
+                f.symbol == symbol and f.side == "BUY" for f in snapshot.fills
+            )
+            if filled:
+                fill_price = next(
+                    f.fill_price for f in snapshot.fills
+                    if f.symbol == symbol and f.side == "BUY"
+                )
+                state.pending_entry = False
+                state.pending_side = ""
+                state.entry_price = fill_price
+                state.avg_entry = fill_price
+                state.entry_bar = self.bar_count
+                state.highest_since_entry = max(fill_price, bar.close)
+                state.lowest_since_entry = 0.0
+                state.trailing_stop = fill_price - atr * self.atr_stop_multiplier
+                state.position_qty = state.pending_qty
+                state.original_qty = state.pending_qty
+                state.pyramid_count = 0
+                state.bars_in_position = 0
+                state.pending_qty = 0
+                # Submit engine SL-M stop
+                signals.append(
+                    Signal(
+                        action="SELL",
+                        symbol=symbol,
+                        quantity=state.position_qty,
+                        order_type="SL_M",
+                        stop_price=state.trailing_stop,
+                        product_type=state.product_type,
+                    )
+                )
+                state.has_engine_stop = True
+            elif not fast_above:
+                # Crossover reversed — cancel unfilled limit
+                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                state.pending_entry = False
+                state.pending_side = ""
+                state.pending_qty = 0
+            else:
+                # Still valid — cancel old limit and resubmit at current close
+                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                signals.append(
+                    Signal(
+                        action="BUY",
+                        symbol=symbol,
+                        quantity=state.pending_qty,
+                        order_type="LIMIT",
+                        limit_price=bar.close,
+                        product_type=state.product_type,
+                    )
+                )
+
+        elif state.pending_side == "SELL":
+            # Check if short entry filled
+            filled = any(
+                f.symbol == symbol and f.side == "SELL" for f in snapshot.fills
+            )
+            if filled:
+                fill_price = next(
+                    f.fill_price for f in snapshot.fills
+                    if f.symbol == symbol and f.side == "SELL"
+                )
+                state.pending_entry = False
+                state.pending_side = ""
+                state.entry_price = fill_price
+                state.avg_entry = fill_price
+                state.entry_bar = self.bar_count
+                state.highest_since_entry = 0.0
+                state.lowest_since_entry = min(fill_price, bar.close)
+                state.trailing_stop = fill_price + atr * self.atr_stop_multiplier
+                state.position_qty = -state.pending_qty
+                state.original_qty = state.pending_qty
+                state.pyramid_count = 0
+                state.bars_in_position = 0
+                state.pending_qty = 0
+                # Submit engine SL-M stop (BUY to cover short)
+                signals.append(
+                    Signal(
+                        action="BUY",
+                        symbol=symbol,
+                        quantity=abs(state.position_qty),
+                        order_type="SL_M",
+                        stop_price=state.trailing_stop,
+                        product_type=state.product_type,
+                    )
+                )
+                state.has_engine_stop = True
+            elif fast_above:
+                # Crossover reversed — cancel unfilled short limit
+                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                state.pending_entry = False
+                state.pending_side = ""
+                state.pending_qty = 0
+            else:
+                # Still valid — cancel old limit and resubmit at current close
+                signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                signals.append(
+                    Signal(
+                        action="SELL",
+                        symbol=symbol,
+                        quantity=state.pending_qty,
+                        order_type="LIMIT",
+                        limit_price=bar.close,
+                        product_type=state.product_type,
+                    )
+                )
