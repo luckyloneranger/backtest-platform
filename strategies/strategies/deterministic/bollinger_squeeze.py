@@ -206,6 +206,9 @@ class BollingerSqueeze(Strategy):
                 qty = (int(capital * self.risk_per_trade
                            / (atr * self.atr_stop_mult))
                        if atr and atr > 0 else 0)
+                # Cap position to available cash
+                max_qty = int(capital / bar.close) if bar.close > 0 else 0
+                qty = min(qty, max_qty)
                 if qty > 0:
                     signals += self.pm.enter_long(
                         symbol, qty, bar.close, "MIS", stop)
@@ -223,6 +226,9 @@ class BollingerSqueeze(Strategy):
                 qty = (int(capital * self.risk_per_trade
                            / (atr * self.atr_stop_mult))
                        if atr and atr > 0 else 0)
+                # Cap position to available cash
+                max_qty = int(capital / bar.close) if bar.close > 0 else 0
+                qty = min(qty, max_qty)
                 if qty > 0:
                     signals += self.pm.enter_short(
                         symbol, qty, bar.close, stop)
