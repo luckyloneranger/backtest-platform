@@ -9,8 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd engine
 cargo build                          # build all crates
 cargo build --release -p backtest-cli # release build of CLI binary
-cargo test                           # run all tests (156 tests across workspace)
-cargo test -p backtest-core           # test single crate (129 tests)
+cargo test                           # run all tests (169 tests across workspace)
+cargo test -p backtest-core           # test single crate (142 tests)
 cargo test -p backtest-core -- matching  # test single module
 ```
 
@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (76 tests)
+pytest tests/ -v                     # run strategy tests (105 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -125,3 +125,11 @@ Per timestamp: check kill switch → process pending orders (with gap handling, 
 - Cost model (`ZerodhaCostModel`): zero equity brokerage, STT (0.1% delivery both sides, 0.025% intraday sell-only), transaction charges, GST, SEBI fees, stamp duty
 - CLI `run` command supports `--exchange` flag (default NSE) for BSE/MCX backtesting
 - Instrument metadata is loaded from `instruments.db` and passed to the engine for correct cost model (instrument type) and strategy use
+- **Zerodha API alignment (strict enforcement):**
+  - DAY validity: all pending orders (limit, SL, SL-M) expire at 15:30 IST each trading day. Strategies must re-place orders on the next day.
+  - IOC validity: `validity="IOC"` orders are cancelled if unfilled on the current bar.
+  - CNC short restriction: selling without a CNC long position is rejected with `CNC_SHORT_NOT_ALLOWED`. Use MIS for intraday shorts.
+  - SL two-price model: `trigger_price` activates the order, `limit_price` is the fill limit. If price gaps past the limit, the SL becomes a pending limit order (may not fill). When `trigger_price=0`, falls back to legacy `stop_price` behavior.
+  - Per-order cancellation: `cancel_order_id` targets a specific order by ID. Without it, all orders for the symbol are cancelled. Order IDs are sequential, visible in `PendingOrderInfo.order_id`.
+  - Order modification is NOT supported. Use CANCEL + new order (adds one bar of latency vs Zerodha's atomic modify).
+  - Cover orders (CO) are NOT supported. Strategies pair entry + SL-M orders manually for the same effect.
