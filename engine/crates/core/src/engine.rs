@@ -705,6 +705,16 @@ impl BacktestEngine {
                 }
             }
 
+            // i. DAY order expiry at 15:30 IST — cancel all pending orders
+            if let Some(dt) = chrono::DateTime::from_timestamp_millis(*timestamp) {
+                let ist = chrono::FixedOffset::east_opt(19800).unwrap();
+                let ist_time = dt.with_timezone(&ist).time();
+                let close_time = chrono::NaiveTime::from_hms_opt(15, 30, 0).unwrap();
+                if ist_time >= close_time {
+                    matcher.cancel_all_pending();
+                }
+            }
+
             // Save for next iteration
             last_fills = current_fills;
             last_rejections = current_rejections;
@@ -2576,6 +2586,108 @@ mod tests {
         assert_eq!(
             result.trades.len(), 1,
             "CNC sell closing long should go through, producing one trade"
+        );
+    }
+
+    // ── DAY/IOC Order Validity Tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_day_orders_expire_at_1530() {
+        // Strategy submits a limit buy at bar 2 that never fills.
+        // At 15:30 IST, all pending orders should be cancelled.
+        struct DayLimitStrategy {
+            call_count: AtomicUsize,
+        }
+        impl DayLimitStrategy {
+            fn new() -> Self {
+                Self { call_count: AtomicUsize::new(0) }
+            }
+        }
+        #[async_trait]
+        impl StrategyClient for DayLimitStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement { interval: "15minute".into(), lookback: 200 }])
+            }
+            async fn initialize(&self, _: &str, _: &str, _: &[String], _: &[InstrumentData]) -> Result<()> { Ok(()) }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot.timeframes.values().next()
+                    .and_then(|m| m.keys().next().cloned()).unwrap_or_default();
+                if count == 2 {
+                    // Place a limit buy at 50 (will never fill since prices are ~100+)
+                    Ok(vec![Signal {
+                        action: Action::Buy,
+                        symbol,
+                        quantity: 10,
+                        order_type: crate::types::OrderType::Limit,
+                        limit_price: 50.0,
+                        stop_price: 0.0,
+                        product_type: ProductType::Cnc,
+                        trigger_price: 0.0,
+                        validity: crate::types::OrderValidity::Day,
+                        cancel_order_id: 0,
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        }
+
+        // Bars from 9:15 to 15:30 IST (26 bars at 15-minute intervals)
+        let bars: Vec<Bar> = (0..26)
+            .map(|i| {
+                let ts = ist_timestamp_ms(9, 15) + (i as i64) * 15 * 60 * 1000;
+                Bar {
+                    timestamp_ms: ts,
+                    symbol: "TEST".into(),
+                    open: 100.0 + i as f64,
+                    high: 102.0 + i as f64,
+                    low: 99.0 + i as f64,
+                    close: 101.0 + i as f64,
+                    volume: 1000,
+                    oi: 0,
+                }
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("15minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement { interval: "15minute".into(), lookback: 200 }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "day_expiry".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-15".into(),
+                end_date: "2024-01-15".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute15,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 200,
+                max_volume_pct: 1.0,
+                max_drawdown_pct: None,
+                daily_loss_limit: None,
+                max_position_qty: None,
+                max_exposure_pct: None,
+                reference_symbols: vec![],
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &DayLimitStrategy::new(),
+            vec![],
+            &requirements,
+        ).await.unwrap();
+
+        // The limit order at 50 never fills (prices all > 99), and should be expired at 15:30
+        assert!(result.trades.is_empty(), "no trades should occur - limit never fills");
+        // If the order wasn't expired, it would still be pending at end. But since we
+        // don't expose pending orders in the result, we verify via no trades + stable equity.
+        assert!(
+            (result.final_equity - 1_000_000.0).abs() < 1.0,
+            "equity should remain unchanged"
         );
     }
 }

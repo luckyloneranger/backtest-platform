@@ -14,7 +14,7 @@ use backtest_proto::backtest::{
 
 use crate::engine::{InstrumentData, IntervalRequirement, MarketSnapshot, StrategyClient};
 use crate::matching::Side;
-use crate::types::{Action, OrderType, ProductType, Signal};
+use crate::types::{Action, OrderType, OrderValidity, ProductType, Signal};
 
 // ── GrpcStrategyClient ─────────────────────────────────────────────────────
 
@@ -261,6 +261,7 @@ impl StrategyClient for GrpcStrategyClient {
                 },
                 limit_price: po.limit_price,
                 stop_price: po.stop_price,
+                order_id: po.order_id,
             })
             .collect();
 
@@ -302,6 +303,10 @@ impl StrategyClient for GrpcStrategyClient {
                     backtest_proto::backtest::signal::ProductType::Mis => ProductType::Mis,
                     backtest_proto::backtest::signal::ProductType::Nrml => ProductType::Nrml,
                 };
+                let validity = match s.validity() {
+                    backtest_proto::backtest::signal::OrderValidity::Day => OrderValidity::Day,
+                    backtest_proto::backtest::signal::OrderValidity::Ioc => OrderValidity::Ioc,
+                };
                 Signal {
                     action,
                     symbol: s.symbol,
@@ -310,9 +315,9 @@ impl StrategyClient for GrpcStrategyClient {
                     limit_price: s.limit_price,
                     stop_price: s.stop_price,
                     product_type,
-                    trigger_price: 0.0,
-                    validity: crate::types::OrderValidity::default(),
-                    cancel_order_id: 0,
+                    trigger_price: s.trigger_price,
+                    validity,
+                    cancel_order_id: s.cancel_order_id,
                 }
             })
             .collect();

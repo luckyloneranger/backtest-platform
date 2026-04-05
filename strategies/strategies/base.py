@@ -81,6 +81,7 @@ class PendingOrder:
     order_type: str          # "MARKET", "LIMIT", "SL", "SL_M"
     limit_price: float
     stop_price: float
+    order_id: int = 0
 
 
 @dataclass
@@ -103,6 +104,9 @@ class Signal:
     limit_price: float = 0.0
     stop_price: float = 0.0
     product_type: str = "CNC"     # "CNC" (delivery), "MIS" (intraday), "NRML" (F&O)
+    trigger_price: float = 0.0
+    validity: str = "DAY"         # "DAY", "IOC"
+    cancel_order_id: int = 0
 
 
 @dataclass

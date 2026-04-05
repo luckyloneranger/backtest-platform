@@ -155,7 +155,7 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
         # Convert pending orders
         pending_orders = [
             PendingOrder(po.symbol, po.side, po.quantity, po.order_type,
-                         po.limit_price, po.stop_price)
+                         po.limit_price, po.stop_price, po.order_id)
             for po in request.pending_orders
         ]
 
@@ -191,6 +191,7 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
             action_map = {"HOLD": 0, "BUY": 1, "SELL": 2, "CANCEL": 3}
             order_map = {"MARKET": 0, "LIMIT": 1, "SL": 2, "SL_M": 3}
             product_map = {"CNC": 0, "MIS": 1, "NRML": 2}
+            validity_map = {"DAY": 0, "IOC": 1}
             proto_signals.append(strategy_pb2.Signal(
                 action=action_map[s.action],
                 symbol=s.symbol,
@@ -199,6 +200,9 @@ class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
                 limit_price=s.limit_price,
                 stop_price=s.stop_price,
                 product_type=product_map.get(s.product_type, 0),
+                trigger_price=s.trigger_price,
+                validity=validity_map.get(s.validity, 0),
+                cancel_order_id=s.cancel_order_id,
             ))
 
         return strategy_pb2.BarResponse(signals=proto_signals)

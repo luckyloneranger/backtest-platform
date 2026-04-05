@@ -111,6 +111,7 @@ message PendingOrderInfo {
   string order_type = 4;
   double limit_price = 5;
   double stop_price = 6;
+  uint64 order_id = 7;
 }
 
 message TradeInfo {
@@ -173,6 +174,10 @@ message Signal {
     MIS = 1;     // Margin Intraday Settlement — equity intraday
     NRML = 2;    // Normal — F&O overnight
   }
+  enum OrderValidity {
+    DAY = 0;
+    IOC = 1;
+  }
   Action action = 1;
   string symbol = 2;
   int32 quantity = 3;
@@ -180,6 +185,9 @@ message Signal {
   double limit_price = 5;
   double stop_price = 6;
   ProductType product_type = 7;
+  OrderValidity validity = 9;
+  double trigger_price = 10;
+  uint64 cancel_order_id = 11;
 }
 
 // --- Complete ---
