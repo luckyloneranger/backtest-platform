@@ -140,7 +140,7 @@ def test_regime_ranging_detected():
 
 def test_regime_volatile_detected():
     """Calm phase followed by wild swings -> BBW spikes -> VOLATILE."""
-    s = create_strategy()
+    s = create_strategy({"regime_confirm_bars": 1})
     seed_daily_volatile(s)
     regime = s.regime.get("TEST", "")
     assert regime == "VOLATILE", f"Expected VOLATILE, got {regime}"
@@ -197,7 +197,7 @@ def test_ranging_bollinger_entry():
 
 def test_volatile_stays_flat():
     """In VOLATILE regime, no entries without 3 confirming signals."""
-    s = create_strategy()
+    s = create_strategy({"regime_confirm_bars": 1})
     seed_daily_volatile(s)
     assert s.regime.get("TEST") == "VOLATILE"
 
@@ -216,21 +216,21 @@ def test_volatile_stays_flat():
 
 
 def test_trending_wider_stop():
-    """Trending regime uses 2x ATR for trailing stop vs 1x for ranging."""
+    """Trending regime uses 2x ATR for trailing stop vs 1.5x for ranging."""
     s = create_strategy()
     assert s.trending_atr_mult == 2.0
-    assert s.ranging_atr_mult == 1.0
+    assert s.ranging_atr_mult == 1.5
 
     # Also verify via the internal helper
     assert s._atr_mult_for_regime("TRENDING") == 2.0
-    assert s._atr_mult_for_regime("RANGING") == 1.0
+    assert s._atr_mult_for_regime("RANGING") == 1.5
     assert s._atr_mult_for_regime("VOLATILE") == 3.0
 
 
 def test_ranging_tighter_stop():
-    """Ranging regime uses 1x ATR for trailing stop (tighter than trending)."""
+    """Ranging regime uses 1.5x ATR for trailing stop (tighter than trending)."""
     s = create_strategy()
-    assert s.ranging_atr_mult == 1.0
+    assert s.ranging_atr_mult == 1.5
     assert s.trending_atr_mult == 2.0
     assert s.ranging_atr_mult < s.trending_atr_mult
 

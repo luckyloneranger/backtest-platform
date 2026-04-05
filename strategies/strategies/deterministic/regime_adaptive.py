@@ -37,18 +37,21 @@ class RegimeAdaptive(Strategy):
 
         # Stop multipliers per regime
         self.trending_atr_mult = config.get("trending_atr_mult", 2.0)
-        self.ranging_atr_mult = config.get("ranging_atr_mult", 1.0)
+        self.ranging_atr_mult = config.get("ranging_atr_mult", 1.5)
         self.volatile_atr_mult = config.get("volatile_atr_mult", 3.0)
 
         # Sizing / risk
         self.volatile_size_pct = config.get("volatile_size_pct", 0.5)
-        self.risk_per_trade = config.get("risk_per_trade", 0.02)
+        self.risk_per_trade = config.get("risk_per_trade", 0.015)
         self.pyramid_levels = config.get("pyramid_levels", 2)
 
         # Indicator params
         self.rsi_oversold = config.get("rsi_oversold", 35)
         self.rsi_overbought = config.get("rsi_overbought", 65)
-        self.max_hold_bars = config.get("max_hold_bars", 40)
+        self.max_hold_bars = config.get("max_hold_bars", 20)
+
+        # Regime smoothing
+        self.regime_confirm_bars = config.get("regime_confirm_bars", 3)
 
         self.instruments = instruments
         self.pm = PositionManager(max_pending_bars=3)
@@ -63,6 +66,8 @@ class RegimeAdaptive(Strategy):
         self.highs_15m: dict[str, deque] = {}
         self.lows_15m: dict[str, deque] = {}
         self.regime: dict[str, str] = {}            # "TRENDING", "RANGING", "VOLATILE"
+        self.pending_regime: dict[str, str] = {}    # candidate regime for smoothing
+        self.regime_counter: dict[str, int] = {}    # consecutive bars in candidate
         self.prev_macd_hist: dict[str, float | None] = {}
         self.current_atr: dict[str, float] = {}
 
@@ -98,14 +103,29 @@ class RegimeAdaptive(Strategy):
         if atr is not None:
             self.current_atr[symbol] = atr
 
-        # Check volatile first: high BBW takes priority (even if ADX is high,
-        # wide bands indicate unstable regime where trend signals are unreliable)
+        # Determine detected regime
         if bbw is not None and avg_bbw is not None and bbw > avg_bbw * self.bbw_volatile_mult:
-            self.regime[symbol] = "VOLATILE"
+            detected = "VOLATILE"
         elif adx is not None and adx > self.adx_trend:
-            self.regime[symbol] = "TRENDING"
+            detected = "TRENDING"
         else:
-            self.regime[symbol] = "RANGING"
+            detected = "RANGING"
+
+        # Regime smoothing: require regime_confirm_bars consecutive detections
+        current = self.regime.get(symbol, "RANGING")
+        if detected != current:
+            if detected == self.pending_regime.get(symbol):
+                self.regime_counter[symbol] = self.regime_counter.get(symbol, 0) + 1
+                if self.regime_counter[symbol] >= self.regime_confirm_bars:
+                    self.regime[symbol] = detected
+                    self.regime_counter[symbol] = 0
+            else:
+                self.pending_regime[symbol] = detected
+                self.regime_counter[symbol] = 1
+        else:
+            # Current regime re-confirmed, reset any pending switch
+            self.pending_regime.pop(symbol, None)
+            self.regime_counter.pop(symbol, None)
 
     def _atr_mult_for_regime(self, regime: str) -> float:
         if regime == "TRENDING":

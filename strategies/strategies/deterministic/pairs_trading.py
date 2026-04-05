@@ -3,8 +3,8 @@
 Finds the most cointegrated pair from the symbol list.
 Computes spread = price_A - hedge_ratio * price_B
 Trades the z-score of the spread:
-  z > +2  -> short A, long B  (spread will converge)
-  z < -2  -> long A, short B
+  z > +1.5  -> short A, long B  (spread will converge)
+  z < -1.5  -> long A, short B
   z crosses 0 -> exit (mean-reverted)
   |z| > 3 -> stop-loss (diverging further)
 """
@@ -26,11 +26,11 @@ class PairsTrading(Strategy):
     def initialize(self, config, instruments):
         self.lookback_period = config.get("lookback_period", 60)
         self.zscore_period = config.get("zscore_period", 20)
-        self.entry_threshold = config.get("entry_threshold", 2.0)
+        self.entry_threshold = config.get("entry_threshold", 1.5)
         self.exit_threshold = config.get("exit_threshold", 0.0)
         self.stop_threshold = config.get("stop_threshold", 3.0)
         self.min_pvalue = config.get("min_pvalue", 0.05)
-        self.risk_pct = config.get("risk_pct", 0.02)
+        self.risk_pct = config.get("risk_pct", 0.05)
         self.max_hold_bars = config.get("max_hold_bars", 50)
         self.instruments = instruments
 

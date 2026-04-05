@@ -2,8 +2,8 @@
 
 Indicators: RSI, MACD, Bollinger Bands, ADX (trend strength), OBV slope (volume)
 Each contributes +1 (bullish), -1 (bearish), or 0 (neutral)
-Entry: score >= threshold (default 3) for long, <= -threshold for short
-Exit: score flips to 0 or opposite, trailing stop, time stop
+Entry: score >= threshold (default 2) for long, <= -threshold for short
+Exit: score drops below entry threshold (< 1 long, > -1 short), trailing stop, time stop
 """
 
 from collections import deque
@@ -35,10 +35,10 @@ class Confluence(Strategy):
         self.adx_trend_threshold = config.get("adx_trend_threshold", 25)
         self.obv_period = config.get("obv_period", 10)
         self.atr_period = config.get("atr_period", 14)
-        self.atr_multiplier = config.get("atr_multiplier", 2.0)
+        self.atr_multiplier = config.get("atr_multiplier", 1.5)
         self.risk_per_trade = config.get("risk_per_trade", 0.02)
-        self.threshold = config.get("threshold", 3)
-        self.max_hold_bars = config.get("max_hold_bars", 30)
+        self.threshold = config.get("threshold", 2)
+        self.max_hold_bars = config.get("max_hold_bars", 20)
         self.min_gain_for_hold = config.get("min_gain_for_hold", 0.005)
 
         self.pm = PositionManager(max_pending_bars=1)
@@ -161,7 +161,7 @@ class Confluence(Strategy):
                     new_stop = self.highest[symbol] - atr * self.atr_multiplier
                     signals += self.pm.update_trailing_stop(symbol, new_stop)
 
-                    if score <= 0:
+                    if score < 1:
                         signals += self.pm.exit_position(symbol)
                     elif state.bars_held > self.max_hold_bars:
                         gain = ((bar.close - state.avg_entry) / state.avg_entry
@@ -177,7 +177,7 @@ class Confluence(Strategy):
                     new_stop = self.lowest[symbol] + atr * self.atr_multiplier
                     signals += self.pm.update_trailing_stop(symbol, new_stop)
 
-                    if score >= 0:
+                    if score > -1:
                         signals += self.pm.exit_position(symbol)
                     elif state.bars_held > self.max_hold_bars:
                         gain = ((state.avg_entry - bar.close) / state.avg_entry
