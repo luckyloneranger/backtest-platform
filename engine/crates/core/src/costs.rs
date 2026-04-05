@@ -80,14 +80,14 @@ impl ZerodhaCostModel {
         };
 
         // 3. Transaction charges (exchange)
-        // NSE: 0.00345% of turnover on both sides
-        let transaction_charges = 0.0000345 * turnover;
+        // NSE: 0.00307% of turnover on both sides
+        let transaction_charges = 0.0000307 * turnover;
 
-        // 4. GST: 18% on (brokerage + transaction charges)
-        let gst = 0.18 * (total_brokerage + transaction_charges);
-
-        // 5. SEBI turnover fees: Rs 10 per crore = 10 / 10_000_000
+        // 4. SEBI turnover fees: Rs 10 per crore = 10 / 10_000_000
         let sebi_fees = turnover * (10.0 / 10_000_000.0);
+
+        // 5. GST: 18% on (brokerage + transaction charges + SEBI fees)
+        let gst = 0.18 * (total_brokerage + transaction_charges + sebi_fees);
 
         // 6. Stamp duty: 0.015% delivery, 0.003% intraday — on buy side only
         let stamp_duty = if params.is_intraday {
@@ -283,14 +283,17 @@ mod tests {
         let costs = model.calculate(&params);
 
         // turnover = 200_000
-        // Transaction charges: 0.0000345 * 200_000 = 6.90
-        let expected_txn = 0.0000345 * 200_000.0;
+        // Transaction charges: 0.0000307 * 200_000 = 6.14
+        let expected_txn = 0.0000307 * 200_000.0;
+
+        // SEBI fees: 10 / 10_000_000 * 200_000 = 0.20
+        let expected_sebi = 200_000.0 * (10.0 / 10_000_000.0);
 
         // Brokerage: 0 (zero brokerage on equity)
         let expected_brokerage = 0.0;
 
-        // GST: 18% of (brokerage + txn charges)
-        let expected_gst = 0.18 * (expected_brokerage + expected_txn);
+        // GST: 18% of (brokerage + txn charges + SEBI fees)
+        let expected_gst = 0.18 * (expected_brokerage + expected_txn + expected_sebi);
 
         assert!(
             approx_eq(costs.gst, expected_gst),
