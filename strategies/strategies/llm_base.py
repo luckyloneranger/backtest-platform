@@ -136,6 +136,18 @@ class LLMStrategy(Strategy):
             if action == "HOLD":
                 continue
 
+            # Validate symbol and quantity for BUY/SELL
+            symbol = item.get("symbol", "").strip()
+            if not symbol:
+                if action != "CANCEL":
+                    logger.warning("Signal missing symbol, skipping")
+                    continue
+
+            quantity = int(item.get("quantity", 0))
+            if action != "CANCEL" and quantity <= 0:
+                logger.warning("Signal for %s has quantity=%d, skipping", symbol, quantity)
+                continue
+
             order_type = item.get("order_type", "MARKET").upper()
             if order_type not in VALID_ORDER_TYPES:
                 order_type = "MARKET"
@@ -156,8 +168,8 @@ class LLMStrategy(Strategy):
 
             signals.append(Signal(
                 action=action,
-                symbol=item.get("symbol", ""),
-                quantity=int(item.get("quantity", 0)),
+                symbol=symbol,
+                quantity=quantity,
                 order_type=order_type,
                 limit_price=float(item.get("limit_price", 0.0)),
                 stop_price=float(item.get("stop_price", 0.0)),

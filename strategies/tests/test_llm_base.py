@@ -237,3 +237,44 @@ def test_parse_signals_slm_without_stop_skipped():
         ])
         signals = s.parse_signals(response)
         assert len(signals) == 0
+
+
+def test_parse_signals_empty_symbol_skipped():
+    """BUY/SELL signal with empty symbol is skipped."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "", "quantity": 10},
+            {"action": "SELL", "symbol": "  ", "quantity": 5},
+            {"action": "BUY", "quantity": 10},  # symbol missing entirely
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 0
+
+
+def test_parse_signals_zero_quantity_skipped():
+    """BUY/SELL signal with quantity=0 is skipped."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "TEST", "quantity": 0},
+            {"action": "SELL", "symbol": "TEST"},  # quantity defaults to 0
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 0
+
+
+def test_parse_signals_cancel_zero_quantity_allowed():
+    """CANCEL signal with quantity=0 is allowed through."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "CANCEL", "symbol": "TEST", "quantity": 0},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 1
+        assert signals[0].action == "CANCEL"
+        assert signals[0].quantity == 0
