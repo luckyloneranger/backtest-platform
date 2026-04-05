@@ -69,7 +69,7 @@ Dependency flow: `cli → data → core → proto`
 - `server/server.py` — gRPC server: handles `GetRequirements`, `Initialize`, `OnBar`, `OnComplete`
 - Deterministic strategies go in `strategies/strategies/deterministic/`, LLM strategies in `strategies/strategies/llm/`, all decorated with `@register`
 - **6 deterministic strategies**: `sma_crossover`, `rsi_daily_trend`, `donchian_breakout` (original), `confluence`, `pairs_trading`, `regime_adaptive` (new, pandas-ta powered). 1 LLM: `llm_signal_generator`.
-- **Strategy tuning insights**: Mean-reversion strategies (RSI) need large positions (`risk_pct=0.3`) and long cooldowns to avoid overtrading. Trend-following strategies (Donchian) benefit from ADX trend filter (`min_adx=20`) to avoid choppy markets. Reducing risk_pct from 0.3→0.2 destroyed RSI's edge by generating 4x more trades.
+- **Strategy tuning insights**: Mean-reversion strategies (RSI) need large positions (`risk_pct=0.3`) and long cooldowns to avoid overtrading. Trend-following strategies (Donchian) benefit from smaller positions (`risk_per_trade=0.01`) and wider stops (`atr_mult=2.0`) to survive drawdowns. Reducing risk_pct from 0.3→0.2 destroyed RSI's edge by generating 4x more trades. Confluence exit speed matters: exiting at score<1 (vs ≤0) improved returns by +6-9% across both years. Regime smoothing (3-bar confirmation) is necessary but insufficient — still 1,400 trades/year. Pairs trading returns near 0% regardless of parameters — NSE stock spreads too tight for mean-reversion after costs. **Parameters that work for trending year (2024) often fail in choppy year (2025) and vice versa.**
 
 ### Strategy Data Flow
 
