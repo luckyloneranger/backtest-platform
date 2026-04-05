@@ -33,7 +33,7 @@ class RsiDailyTrend(Strategy):
         self.max_pyramid_levels = config.get("max_pyramid_levels", 2)
         self.atr_period = config.get("atr_period", 14)
         self.atr_multiplier = config.get("atr_multiplier", 2.0)
-        self.max_loss_pct = config.get("max_loss_pct", 0.02)
+        self.max_loss_pct = config.get("max_loss_pct", 0.03)
         self.max_hold_bars = config.get("max_hold_bars", 40)
         self.cooldown_bars = config.get("cooldown_bars", 50)
         self.instruments = instruments
