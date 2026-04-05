@@ -20,15 +20,15 @@ class SmaCrossover(Strategy):
         return [{"interval": "day", "lookback": 200}]
 
     def initialize(self, config, instruments):
-        self.fast_period = config.get("fast_period", 10)
-        self.slow_period = config.get("slow_period", 30)
+        self.fast_period = config.get("fast_period", 5)
+        self.slow_period = config.get("slow_period", 20)
         if self.fast_period >= self.slow_period:
             raise ValueError(f"fast_period ({self.fast_period}) >= slow_period ({self.slow_period})")
         self.risk_per_trade = config.get("risk_per_trade", 0.02)
         self.atr_period = config.get("atr_period", 14)
         self.atr_multiplier = config.get("atr_multiplier", 2.0)
-        self.min_spread = config.get("min_spread", 0.005)
-        self.max_hold_bars = config.get("max_hold_bars", 50)
+        self.min_spread = config.get("min_spread", 0.002)
+        self.max_hold_bars = config.get("max_hold_bars", 30)
         self.pyramid_levels = config.get("pyramid_levels", 2)
 
         self.pm = PositionManager(max_pending_bars=1)  # daily bars, cancel next day

@@ -9,7 +9,7 @@ Trailing stop: 1.5*ATR from highest/lowest since entry
 from collections import deque
 from server.registry import register
 from strategies.base import Strategy, MarketSnapshot, InstrumentInfo, Signal
-from strategies.indicators import compute_atr
+from strategies.indicators import compute_atr, compute_adx
 from strategies.position_manager import PositionManager
 
 
@@ -25,13 +25,14 @@ class DonchianBreakout(Strategy):
     def initialize(self, config, instruments):
         self.channel_period = config.get("channel_period", 20)
         self.atr_period = config.get("atr_period", 14)
-        self.atr_multiplier = config.get("atr_multiplier", 1.5)
+        self.atr_multiplier = config.get("atr_multiplier", 2.0)
         self.volume_factor = config.get("volume_factor", 1.0)
-        self.risk_per_trade = config.get("risk_per_trade", 0.02)
+        self.risk_per_trade = config.get("risk_per_trade", 0.015)
         self.profit_target_atr = config.get("profit_target_atr", 2.0)
         self.max_loss_pct = config.get("max_loss_pct", 0.02)
         self.max_hold_bars = config.get("max_hold_bars", 30)
         self.pyramid_levels = config.get("pyramid_levels", 2)
+        self.min_adx = config.get("min_adx", 20)
         self.instruments = instruments
 
         self.pm = PositionManager(max_pending_bars=1)
@@ -44,6 +45,7 @@ class DonchianBreakout(Strategy):
         self.current_atr: dict[str, float] = {}
         self.highest: dict[str, float] = {}
         self.lowest: dict[str, float] = {}
+        self.adx_values: dict[str, float] = {}
 
     def _ensure(self, symbol):
         if symbol not in self.daily_highs:
@@ -74,6 +76,10 @@ class DonchianBreakout(Strategy):
                                   list(self.daily_closes[symbol]), self.atr_period)
                 if atr is not None:
                     self.current_atr[symbol] = atr
+                adx = compute_adx(list(self.daily_highs[symbol]), list(self.daily_lows[symbol]),
+                                  list(self.daily_closes[symbol]), 14)
+                if adx is not None:
+                    self.adx_values[symbol] = adx
 
         # Process 15-minute bars
         if "15minute" not in snapshot.timeframes:
@@ -104,7 +110,7 @@ class DonchianBreakout(Strategy):
                 if inst and inst.lot_size > 1:
                     qty = (qty // inst.lot_size) * inst.lot_size
 
-                if qty > 0 and vol_ok:
+                if qty > 0 and vol_ok and self.adx_values.get(symbol, 0) > self.min_adx:
                     # Long breakout
                     if bar.close > ch_high:
                         vol_strong = volumes[-1] > avg_vol * 1.5 if volumes else False

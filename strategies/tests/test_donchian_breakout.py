@@ -62,7 +62,7 @@ def create_strategy(config=None):
     return s
 
 
-def seed_daily(strategy, symbol="TEST", n=22, base=100.0, volume=100_000):
+def seed_daily(strategy, symbol="TEST", n=30, base=100.0, volume=100_000):
     """Feed n daily bars to build channel + ATR. Returns list of snapshots used."""
     snaps = []
     for i in range(n):
