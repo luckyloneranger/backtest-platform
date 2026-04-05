@@ -2,7 +2,7 @@
 
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo,
-    Signal, FillInfo,
+    Signal, FillInfo, PendingOrder,
 )
 from strategies.deterministic.rsi_daily_trend import RsiDailyTrend
 from strategies.indicators import compute_rsi, compute_ema
@@ -20,6 +20,7 @@ def make_snapshot(
     cash: float = 100_000.0,
     positions: list[Position] | None = None,
     fills: list[FillInfo] | None = None,
+    pending_orders: list[PendingOrder] | None = None,
 ) -> MarketSnapshot:
     timeframes = {}
     if close_15m is not None:
@@ -33,7 +34,8 @@ def make_snapshot(
     pos_list = positions if positions is not None else []
     equity = cash + sum(p.quantity * p.avg_price for p in pos_list)
     fill_list = fills if fills is not None else []
-    return MarketSnapshot(
+    po_list = pending_orders if pending_orders is not None else []
+    snap = MarketSnapshot(
         timestamp_ms=ts,
         timeframes=timeframes,
         history={},
@@ -44,6 +46,8 @@ def make_snapshot(
         closed_trades=[],
         context=SessionContext(100_000.0, ts, 1000, "2024-01-01", "2024-12-31", ["15minute", "day"], 200),
     )
+    snap.pending_orders = po_list
+    return snap
 
 
 def _setup_strategy(**overrides) -> RsiDailyTrend:
@@ -574,12 +578,14 @@ def test_cancel_stale_limit_after_3_bars():
     ts = 200
     drop = [104, 100, 96, 92, 88]
     limit_submitted = False
+    limit_sig = None
     for p in drop:
         snap = make_snapshot(ts, close_15m=float(p))
         sigs = s.on_bar(snap)
         for sig in sigs:
             if sig.action == "BUY" and sig.order_type == "LIMIT":
                 limit_submitted = True
+                limit_sig = sig
         if limit_submitted:
             break
         ts += 1
@@ -588,13 +594,19 @@ def test_cancel_stale_limit_after_3_bars():
     assert state.pending_entry_bar > 0, "pending_entry_bar should be set"
     submit_bar = state.pending_entry_bar
 
+    # The LIMIT order is still pending in the engine (not expired, not filled)
+    pending_limit = PendingOrder(
+        symbol="TEST", side="BUY", quantity=limit_sig.quantity,
+        order_type="LIMIT", limit_price=limit_sig.limit_price, stop_price=0.0,
+    )
+
     # Feed 3 more bars without fill — no cancel yet
     # Use rising prices so RSI climbs back up (no re-entry after cancel)
     cancel_signals = []
     rise_prices = [95.0, 100.0, 105.0]
     for p in rise_prices:
         ts += 1
-        snap = make_snapshot(ts, close_15m=p)
+        snap = make_snapshot(ts, close_15m=p, pending_orders=[pending_limit])
         sigs = s.on_bar(snap)
         cancel_signals.extend([sig for sig in sigs if sig.action == "CANCEL"])
 
@@ -603,7 +615,7 @@ def test_cancel_stale_limit_after_3_bars():
     # 4th bar (> 3 bars elapsed) — should cancel
     # Use a high price so RSI > 40 and no re-entry is triggered
     ts += 1
-    snap = make_snapshot(ts, close_15m=110.0)
+    snap = make_snapshot(ts, close_15m=110.0, pending_orders=[pending_limit])
     sigs = s.on_bar(snap)
     cancel_now = [sig for sig in sigs if sig.action == "CANCEL"]
 
@@ -831,3 +843,224 @@ def test_stop_hit_resets_state():
     assert state.has_engine_stop is False, "has_engine_stop should be False after stop-hit"
     assert state.total_qty == 0, "total_qty should be 0 after stop-hit"
     assert state.avg_entry_price == 0.0, "avg_entry_price should be 0 after stop-hit"
+
+
+# --- DAY order expiry tests ---
+
+def test_stop_resubmitted_after_expiry():
+    """Long position with has_engine_stop=True but no SL-M in pending_orders.
+
+    The engine expired the stop at 15:30 IST. Next morning, the strategy should
+    re-submit the SL-M at the current trailing_stop price.
+    """
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_uptrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup
+    warmup = [100, 101, 102, 103, 104, 105, 106]
+    _feed_15m_prices(s, warmup)
+
+    # Set up a long position with an engine stop that has expired
+    entry_qty = 100
+    state.direction = "long"
+    state.pyramid_level = 1
+    state.avg_entry_price = 90.0
+    state.total_qty = entry_qty
+    state.entry_bar = state.bar_count
+    state.partial_taken = True
+    state.has_engine_stop = True
+    state.product_type = "CNC"
+    state.trailing_stop = 85.0
+
+    # Next bar: position still held, but pending_orders is EMPTY (stop expired)
+    held = Position(symbol="TEST", quantity=entry_qty, avg_price=90.0, unrealized_pnl=0.0)
+    snap = make_snapshot(
+        600, close_15m=91.0, positions=[held],
+        pending_orders=[],  # engine expired the SL-M
+    )
+    sigs = s.on_bar(snap)
+
+    # Should re-submit SL-M at the trailing_stop price
+    slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"]
+    assert len(slm_sigs) >= 1, "Should re-submit SL-M after expiry"
+    assert slm_sigs[0].action == "SELL", "Re-submitted stop should be SELL for long"
+    assert abs(slm_sigs[0].stop_price - 85.0) < 0.01, \
+        f"Re-submitted stop should be at trailing_stop=85.0, got {slm_sigs[0].stop_price}"
+    assert slm_sigs[0].product_type == "CNC", "Should preserve product_type CNC"
+
+
+def test_stop_resubmitted_after_expiry_short():
+    """Short position with has_engine_stop=True but no SL-M in pending_orders.
+
+    Same as long-side test but for short positions -- re-submitted stop is a BUY.
+    """
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_downtrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup
+    warmup = [100, 99, 98, 97, 96, 95, 94]
+    _feed_15m_prices(s, warmup)
+
+    # Set up a short position with an engine stop that has expired
+    current_qty = 100
+    state.direction = "short"
+    state.pyramid_level = 1
+    state.avg_entry_price = 108.0
+    state.total_qty = current_qty
+    state.entry_bar = state.bar_count
+    state.partial_taken = True
+    state.has_engine_stop = True
+    state.product_type = "MIS"
+    state.trailing_stop = 115.0
+
+    # Next bar: position still held, but pending_orders is EMPTY (stop expired)
+    held = Position(symbol="TEST", quantity=-current_qty, avg_price=108.0, unrealized_pnl=0.0)
+    snap = make_snapshot(
+        600, close_15m=107.0, positions=[held],
+        pending_orders=[],  # engine expired the SL-M
+    )
+    sigs = s.on_bar(snap)
+
+    # Should re-submit SL-M at the trailing_stop price
+    slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"]
+    assert len(slm_sigs) >= 1, "Should re-submit SL-M after expiry (short)"
+    assert slm_sigs[0].action == "BUY", "Re-submitted stop should be BUY for short"
+    assert abs(slm_sigs[0].stop_price - 115.0) < 0.01, \
+        f"Re-submitted stop should be at trailing_stop=115.0, got {slm_sigs[0].stop_price}"
+
+
+def test_no_stop_resubmit_when_stop_present():
+    """When engine stop is still present in pending_orders, no re-submission should happen."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_uptrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup
+    warmup = [100, 101, 102, 103, 104, 105, 106]
+    _feed_15m_prices(s, warmup)
+
+    # Set up a long position with engine stop still present
+    entry_qty = 100
+    state.direction = "long"
+    state.pyramid_level = 1
+    state.avg_entry_price = 90.0
+    state.total_qty = entry_qty
+    state.entry_bar = state.bar_count
+    state.partial_taken = True
+    state.has_engine_stop = True
+    state.product_type = "MIS"
+    state.trailing_stop = 85.0
+
+    # Stop is still in pending_orders
+    existing_stop = PendingOrder(
+        symbol="TEST", side="SELL", quantity=entry_qty,
+        order_type="SL_M", limit_price=0.0, stop_price=85.0,
+    )
+    held = Position(symbol="TEST", quantity=entry_qty, avg_price=90.0, unrealized_pnl=0.0)
+    snap = make_snapshot(
+        600, close_15m=91.0, positions=[held],
+        pending_orders=[existing_stop],
+    )
+    sigs = s.on_bar(snap)
+
+    # Should NOT have a re-submission SL-M (the first SL-M in signals, if any,
+    # should be from trailing stop ratchet, not a re-submission)
+    # With atr_stop_multiplier=100.0, trailing stop won't ratchet, so no SL-M expected
+    slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"]
+    assert len(slm_sigs) == 0, \
+        f"Should NOT re-submit SL-M when stop still present, but got {len(slm_sigs)} SL-M signals"
+
+
+def test_pending_entry_cleared_on_expiry():
+    """pending_entry_bar > 0, empty pending_orders, no fills => entry expired, reset state."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_uptrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup
+    warmup = [100, 101, 102, 103, 104, 105, 106]
+    _feed_15m_prices(s, warmup)
+
+    # Drop to trigger LIMIT entry
+    ts = 200
+    limit_submitted = False
+    drop = [104, 100, 96, 92, 88]
+    for p in drop:
+        snap = make_snapshot(ts, close_15m=float(p))
+        sigs = s.on_bar(snap)
+        for sig in sigs:
+            if sig.action == "BUY" and sig.order_type == "LIMIT":
+                limit_submitted = True
+        if limit_submitted:
+            break
+        ts += 1
+
+    assert limit_submitted, "Should have submitted LIMIT entry"
+    assert state.pending_entry_bar > 0, "pending_entry_bar should be set"
+    assert state.direction == "flat", "Direction should be flat (awaiting fill)"
+
+    # Next bar: no fill, no pending orders (engine expired the LIMIT at 15:30)
+    # Use a high price to push RSI above entry threshold so no re-entry is triggered
+    ts += 1
+    snap = make_snapshot(
+        ts, close_15m=120.0,
+        pending_orders=[],  # engine expired the LIMIT
+        fills=[],           # no fills
+    )
+    sigs = s.on_bar(snap)
+
+    assert state.pending_entry_bar == 0, \
+        f"pending_entry_bar should be reset after expiry, got {state.pending_entry_bar}"
+    assert state.direction == "flat", "Direction should remain flat after entry expiry"
+
+
+def test_pending_entry_not_cleared_when_limit_present():
+    """pending_entry_bar > 0 with LIMIT still in pending_orders => do not reset."""
+    s = _setup_strategy(max_loss_pct=0.99, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    _establish_uptrend(s)
+
+    state = s._get_state("TEST")
+
+    # Warmup
+    warmup = [100, 101, 102, 103, 104, 105, 106]
+    _feed_15m_prices(s, warmup)
+
+    # Drop to trigger LIMIT entry
+    ts = 200
+    limit_submitted = False
+    limit_sig = None
+    drop = [104, 100, 96, 92, 88]
+    for p in drop:
+        snap = make_snapshot(ts, close_15m=float(p))
+        sigs = s.on_bar(snap)
+        for sig in sigs:
+            if sig.action == "BUY" and sig.order_type == "LIMIT":
+                limit_submitted = True
+                limit_sig = sig
+        if limit_submitted:
+            break
+        ts += 1
+
+    assert limit_submitted and limit_sig is not None
+
+    # Next bar: LIMIT still in pending_orders (not expired, not filled)
+    pending_limit = PendingOrder(
+        symbol="TEST", side="BUY", quantity=limit_sig.quantity,
+        order_type="LIMIT", limit_price=limit_sig.limit_price, stop_price=0.0,
+    )
+    ts += 1
+    snap = make_snapshot(
+        ts, close_15m=89.0,
+        pending_orders=[pending_limit],
+        fills=[],
+    )
+    sigs = s.on_bar(snap)
+
+    assert state.pending_entry_bar > 0, \
+        "pending_entry_bar should NOT be reset when LIMIT is still pending"

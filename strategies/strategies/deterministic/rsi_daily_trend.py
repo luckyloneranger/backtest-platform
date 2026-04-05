@@ -267,6 +267,21 @@ class RsiDailyTrend(Strategy):
         if current_qty == 0:
             current_qty = state.total_qty
 
+        # Re-submit expired engine stop (DAY order expiry at 15:30 IST)
+        if state.has_engine_stop and state.trailing_stop > 0:
+            has_stop = any(
+                po.symbol == symbol and po.order_type == "SL_M"
+                for po in snapshot.pending_orders
+            )
+            if not has_stop:
+                signals.append(Signal(
+                    action="SELL", symbol=symbol,
+                    quantity=current_qty,
+                    order_type="SL_M",
+                    stop_price=state.trailing_stop,
+                    product_type=state.product_type,
+                ))
+
         # Update trailing stop (ratchet upwards) and replace engine SL-M
         if atr is not None and state.avg_entry_price > 0:
             new_stop = bar_close - self.atr_stop_multiplier * atr
@@ -402,6 +417,21 @@ class RsiDailyTrend(Strategy):
         current_qty = self._held_short_qty(symbol, snapshot)
         if current_qty == 0:
             current_qty = state.total_qty
+
+        # Re-submit expired engine stop (DAY order expiry at 15:30 IST)
+        if state.has_engine_stop and state.trailing_stop > 0:
+            has_stop = any(
+                po.symbol == symbol and po.order_type == "SL_M"
+                for po in snapshot.pending_orders
+            )
+            if not has_stop:
+                signals.append(Signal(
+                    action="BUY", symbol=symbol,
+                    quantity=current_qty,
+                    order_type="SL_M",
+                    stop_price=state.trailing_stop,
+                    product_type=state.product_type,
+                ))
 
         # Update trailing stop for shorts (ratchet downwards -- lower is better for shorts)
         if atr is not None and state.avg_entry_price > 0:
@@ -590,6 +620,22 @@ class RsiDailyTrend(Strategy):
         if state.pending_entry_bar > 0 and state.bar_count - state.pending_entry_bar > 3:
             signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
             state.pending_entry_bar = 0
+
+        # --- Detect expired pending entry (DAY order expiry at 15:30 IST) ---
+        if state.pending_entry_bar > 0 and state.direction == "flat":
+            has_pending = any(
+                po.symbol == symbol and po.order_type == "LIMIT"
+                for po in snapshot.pending_orders
+            )
+            if not has_pending:
+                # Check if it was a fill (handled above) or an expiry (no fill, no pending)
+                filled = any(
+                    f.symbol == symbol and (f.side == "BUY" or f.side == "SELL")
+                    for f in snapshot.fills
+                )
+                if not filled:
+                    # Entry expired by engine — reset pending state
+                    state.pending_entry_bar = 0
 
         # --- Check for stop-hit (SL-M fill detected) ---
         if state.has_engine_stop and state.direction != "flat":
