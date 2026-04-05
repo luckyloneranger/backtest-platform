@@ -6,32 +6,37 @@ Multi-timeframe strategy that uses:
 - Daily ATR for trailing stop calculation
 
 Long entry (scaled pyramid in uptrend):
-- Level 1: RSI < 40 AND daily trend up -> buy 1/3 of target position
-- Level 2: RSI < 30 AND already at Level 1 -> buy another 1/3
-- Level 3: RSI < 20 AND already at Level 1+2 -> buy final 1/3
+- Level 1: RSI < 40 AND daily trend up -> LIMIT buy 1/3 of target position at close * 0.999
+- Level 2: RSI < 30 AND already at Level 1 -> LIMIT buy another 1/3
+- Level 3: RSI < 20 AND already at Level 1+2 -> LIMIT buy final 1/3
 
 Short entry (scaled pyramid in downtrend):
-- Level 1: RSI > 60 AND daily trend down -> sell 1/3 of target position
-- Level 2: RSI > 70 AND already at Level 1 -> sell another 1/3
-- Level 3: RSI > 80 AND already at Level 1+2 -> sell final 1/3
+- Level 1: RSI > 60 AND daily trend down -> LIMIT sell 1/3 at close * 1.001
+- Level 2: RSI > 70 AND already at Level 1 -> LIMIT sell another 1/3
+- Level 3: RSI > 80 AND already at Level 1+2 -> LIMIT sell final 1/3
 
 Trend filter:
 - Trend UP = daily close > EMA AND EMA is rising (current EMA > EMA from 5 bars ago)
 - Trend DOWN = daily close < EMA AND EMA is falling (current EMA < EMA from 5 bars ago)
 
+Order types:
+- Entry: LIMIT orders (cancel after 3 bars unfilled)
+- Stop loss: engine SL-M orders (cancel + replace on trailing stop ratchet)
+- Partial/full exit: MARKET orders (preceded by CANCEL of engine stop)
+- Dynamic product: CNC for deep oversold (RSI < 25 in uptrend), MIS otherwise
+- Shorts always MIS
+
 Long exits:
-- Partial exit: sell 1/2 when RSI > rsi_partial_exit (default 60)
-- Full exit: RSI > rsi_full_exit (70) OR trend reversal OR trailing stop OR max loss
-- Trailing stop: avg_entry_price - atr_stop_multiplier * daily_ATR
-- Max loss stop: avg_entry_price * (1 - max_loss_pct)
-- Time stop: exit after max_hold_bars if gain < 0.5%
+- Partial exit: sell 1/2 when RSI > rsi_partial_exit (default 60), replace stop at breakeven
+- Full exit: RSI > rsi_full_exit (70) OR trend reversal OR time stop -> CANCEL + market SELL
+- Trailing stop: engine SL-M ratcheted each bar (avg_entry - ATR * multiplier)
+- Max loss stop: engine SL-M at avg_entry * (1 - max_loss_pct)
 
 Short exits:
-- Partial cover: buy 1/2 when RSI < (100 - rsi_partial_exit) i.e. RSI < 40
-- Full cover: RSI < (100 - rsi_full_exit) i.e. RSI < 30 OR trend reversal OR trailing stop OR max loss
-- Trailing stop: avg_entry_price + atr_stop_multiplier * daily_ATR (price above entry is bad)
-- Max loss stop: avg_entry_price * (1 + max_loss_pct)
-- Time stop: exit after max_hold_bars if gain < 0.5%
+- Partial cover: buy 1/2 when RSI < (100 - rsi_partial_exit) i.e. RSI < 40, replace stop at breakeven
+- Full cover: RSI < (100 - rsi_full_exit) i.e. RSI < 30 OR trend reversal OR time stop -> CANCEL + market BUY
+- Trailing stop: engine SL-M ratcheted each bar (avg_entry + ATR * multiplier)
+- Max loss stop: engine SL-M at avg_entry * (1 + max_loss_pct)
 
 Target position = risk_pct * portfolio.cash / price
 
@@ -64,6 +69,9 @@ class SymbolState:
     partial_taken: bool = False
     trailing_stop: float = 0.0
     last_exit_bar: int = 0  # cooldown: bar when last position was closed
+    pending_entry_bar: int = 0    # bar when limit was submitted (cancel after 3)
+    has_engine_stop: bool = False
+    product_type: str = "MIS"
     prices_15m: deque = field(default_factory=lambda: deque(maxlen=110))
     prices_daily: deque = field(default_factory=lambda: deque(maxlen=60))
     daily_highs: deque = field(default_factory=lambda: deque(maxlen=60))
@@ -82,7 +90,11 @@ class RsiDailyTrend(Strategy):
 
     Uses 15-minute RSI for timing pyramid entries/exits and daily EMA for
     trend direction. Supports long and short positions with scaled entries,
-    partial exits, trailing stops, max-loss stops, and time-based exits.
+    partial exits, engine SL-M stops, and time-based exits.
+
+    Entries use LIMIT orders (cancelled after 3 bars if unfilled).
+    Stops use engine SL-M orders (ratcheted on trailing stop updates).
+    Product type is dynamic: CNC for deep oversold longs, MIS otherwise.
     """
 
     def required_data(self) -> list[dict]:
@@ -185,19 +197,6 @@ class RsiDailyTrend(Strategy):
         else:
             state.cached_trend_down = False
 
-    def _compute_trailing_stop(self, state: SymbolState) -> float:
-        """Compute trailing stop based on ATR (for long positions)."""
-        atr = compute_atr(
-            list(state.daily_highs),
-            list(state.daily_lows),
-            list(state.daily_closes),
-            self.atr_period,
-        )
-        if atr is None or state.avg_entry_price <= 0:
-            return 0.0
-
-        return state.avg_entry_price - self.atr_stop_multiplier * atr
-
     def _reset_state(self, state: SymbolState) -> None:
         """Reset position-related state after full exit."""
         state.last_exit_bar = state.bar_count  # cooldown starts now
@@ -208,69 +207,78 @@ class RsiDailyTrend(Strategy):
         state.entry_bar = 0
         state.partial_taken = False
         state.trailing_stop = 0.0
+        state.pending_entry_bar = 0
+        state.has_engine_stop = False
+        state.product_type = "MIS"
 
     def _process_long_entries(
         self, state: SymbolState, symbol: str, bar_close: float,
         rsi: float, trend_up: bool, atr: float | None,
         level_qty: int, signals: list[Signal],
     ) -> None:
-        """Handle long pyramid entries (levels 1-3)."""
+        """Handle long pyramid entries (levels 1-3) using LIMIT orders."""
         # Cooldown check: don't re-enter too soon after exiting
         if state.direction == "flat" and state.last_exit_bar > 0:
             if state.bar_count - state.last_exit_bar < self.cooldown_bars:
                 return
 
+        # Don't submit new entry if one is already pending
+        if state.pending_entry_bar > 0:
+            return
+
         if state.direction == "flat" and rsi < self.rsi_entry_1 and trend_up and level_qty > 0:
+            product = "CNC" if rsi < 25 and trend_up else "MIS"
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
-                product_type="MIS",
+                order_type="LIMIT", limit_price=bar_close * 0.999,
+                product_type=product,
             ))
-            state.direction = "long"
-            state.avg_entry_price = bar_close
-            state.total_qty = level_qty
-            state.pyramid_level = 1
-            state.entry_bar = state.bar_count
-            state.partial_taken = False
-            if atr is not None:
-                state.trailing_stop = bar_close - self.atr_stop_multiplier * atr
+            state.pending_entry_bar = state.bar_count
+            state.product_type = product
 
         elif state.direction == "long" and state.pyramid_level == 1 and self.max_pyramid_levels >= 2 and rsi < self.rsi_entry_2 and level_qty > 0:
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
-                product_type="MIS",
+                order_type="LIMIT", limit_price=bar_close * 0.999,
+                product_type=state.product_type,
             ))
-            old_cost = state.avg_entry_price * state.total_qty
-            new_cost = bar_close * level_qty
-            state.total_qty += level_qty
-            state.avg_entry_price = (old_cost + new_cost) / state.total_qty
-            state.pyramid_level = 2
+            state.pending_entry_bar = state.bar_count
 
         elif state.direction == "long" and state.pyramid_level == 2 and self.max_pyramid_levels >= 3 and rsi < self.rsi_entry_3 and level_qty > 0:
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
-                product_type="MIS",
+                order_type="LIMIT", limit_price=bar_close * 0.999,
+                product_type=state.product_type,
             ))
-            old_cost = state.avg_entry_price * state.total_qty
-            new_cost = bar_close * level_qty
-            state.total_qty += level_qty
-            state.avg_entry_price = (old_cost + new_cost) / state.total_qty
-            state.pyramid_level = 3
+            state.pending_entry_bar = state.bar_count
 
     def _process_long_exits(
         self, state: SymbolState, symbol: str, bar_close: float,
         rsi: float, trend_up: bool, atr: float | None,
         snapshot: MarketSnapshot, signals: list[Signal],
     ) -> None:
-        """Handle long position exits (partial + full)."""
+        """Handle long position exits (partial + full).
+
+        Engine handles trailing stop and max loss via SL-M orders.
+        Strategy handles: RSI exits, trend reversal, time stop (CANCEL + market SELL).
+        Trailing stop ratchet: CANCEL old SL-M + submit new SL-M each bar.
+        """
         current_qty = self._held_qty(symbol, snapshot)
         if current_qty == 0:
             current_qty = state.total_qty
 
-        # Update trailing stop (ratchet upwards)
+        # Update trailing stop (ratchet upwards) and replace engine SL-M
         if atr is not None and state.avg_entry_price > 0:
             new_stop = bar_close - self.atr_stop_multiplier * atr
             if new_stop > state.trailing_stop:
                 state.trailing_stop = new_stop
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    signals.append(Signal(
+                        action="SELL", symbol=symbol, quantity=current_qty,
+                        order_type="SL_M", stop_price=state.trailing_stop,
+                        product_type=state.product_type,
+                    ))
 
         # Check partial exit: RSI > partial threshold, not yet taken
         if (
@@ -282,10 +290,20 @@ class RsiDailyTrend(Strategy):
             if sell_qty > 0:
                 signals.append(Signal(
                     action="SELL", symbol=symbol, quantity=sell_qty,
-                    product_type="MIS",
+                    product_type=state.product_type,
                 ))
                 state.partial_taken = True
                 state.total_qty -= sell_qty
+                # Replace stop at breakeven for remaining
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    remaining = current_qty - sell_qty
+                    signals.append(Signal(
+                        action="SELL", symbol=symbol, quantity=remaining,
+                        order_type="SL_M", stop_price=state.avg_entry_price,
+                        product_type=state.product_type,
+                    ))
+                    state.trailing_stop = state.avg_entry_price
 
         # Check full exit conditions
         else:
@@ -301,16 +319,6 @@ class RsiDailyTrend(Strategy):
                 if ema is not None:
                     should_full_exit = True
 
-            # Trailing stop exit
-            if state.trailing_stop > 0 and bar_close <= state.trailing_stop:
-                should_full_exit = True
-
-            # Max loss stop
-            if state.avg_entry_price > 0:
-                max_loss_price = state.avg_entry_price * (1 - self.max_loss_pct)
-                if bar_close <= max_loss_price:
-                    should_full_exit = True
-
             # Time stop: held too long with insufficient gain
             bars_held = state.bar_count - state.entry_bar
             if bars_held > self.max_hold_bars and state.avg_entry_price > 0:
@@ -319,9 +327,13 @@ class RsiDailyTrend(Strategy):
                     should_full_exit = True
 
             if should_full_exit and current_qty > 0:
+                # Cancel engine stop before market exit
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    state.has_engine_stop = False
                 signals.append(Signal(
                     action="SELL", symbol=symbol, quantity=current_qty,
-                    product_type="MIS",
+                    product_type=state.product_type,
                 ))
                 self._reset_state(state)
 
@@ -330,9 +342,10 @@ class RsiDailyTrend(Strategy):
         rsi: float, trend_down: bool, atr: float | None,
         level_qty: int, signals: list[Signal],
     ) -> None:
-        """Handle short pyramid entries (levels 1-3).
+        """Handle short pyramid entries (levels 1-3) using LIMIT orders.
 
         Short side RSI thresholds are mirrored: 100 - rsi_entry_X.
+        Shorts always use MIS product type.
         """
         short_entry_1 = 100 - self.rsi_entry_1  # default 60
         short_entry_2 = 100 - self.rsi_entry_2  # default 70
@@ -343,42 +356,34 @@ class RsiDailyTrend(Strategy):
             if state.bar_count - state.last_exit_bar < self.cooldown_bars:
                 return
 
+        # Don't submit new entry if one is already pending
+        if state.pending_entry_bar > 0:
+            return
+
         if state.direction == "flat" and rsi > short_entry_1 and trend_down and level_qty > 0:
             signals.append(Signal(
                 action="SELL", symbol=symbol, quantity=level_qty,
+                order_type="LIMIT", limit_price=bar_close * 1.001,
                 product_type="MIS",
             ))
-            state.direction = "short"
-            state.avg_entry_price = bar_close
-            state.total_qty = level_qty
-            state.pyramid_level = 1
-            state.entry_bar = state.bar_count
-            state.partial_taken = False
-            # Trailing stop for shorts is ABOVE entry (price going up = bad)
-            if atr is not None:
-                state.trailing_stop = bar_close + self.atr_stop_multiplier * atr
+            state.pending_entry_bar = state.bar_count
+            state.product_type = "MIS"
 
         elif state.direction == "short" and state.pyramid_level == 1 and self.max_pyramid_levels >= 2 and rsi > short_entry_2 and level_qty > 0:
             signals.append(Signal(
                 action="SELL", symbol=symbol, quantity=level_qty,
+                order_type="LIMIT", limit_price=bar_close * 1.001,
                 product_type="MIS",
             ))
-            old_cost = state.avg_entry_price * state.total_qty
-            new_cost = bar_close * level_qty
-            state.total_qty += level_qty
-            state.avg_entry_price = (old_cost + new_cost) / state.total_qty
-            state.pyramid_level = 2
+            state.pending_entry_bar = state.bar_count
 
         elif state.direction == "short" and state.pyramid_level == 2 and self.max_pyramid_levels >= 3 and rsi > short_entry_3 and level_qty > 0:
             signals.append(Signal(
                 action="SELL", symbol=symbol, quantity=level_qty,
+                order_type="LIMIT", limit_price=bar_close * 1.001,
                 product_type="MIS",
             ))
-            old_cost = state.avg_entry_price * state.total_qty
-            new_cost = bar_close * level_qty
-            state.total_qty += level_qty
-            state.avg_entry_price = (old_cost + new_cost) / state.total_qty
-            state.pyramid_level = 3
+            state.pending_entry_bar = state.bar_count
 
     def _process_short_exits(
         self, state: SymbolState, symbol: str, bar_close: float,
@@ -387,6 +392,8 @@ class RsiDailyTrend(Strategy):
     ) -> None:
         """Handle short position exits (partial cover + full cover).
 
+        Engine handles trailing stop and max loss via SL-M orders.
+        Strategy handles: RSI exits, trend reversal, time stop (CANCEL + market BUY).
         Short exit RSI thresholds are mirrored: 100 - rsi_exit_X.
         """
         short_partial_exit = 100 - self.rsi_partial_exit  # default 40
@@ -401,6 +408,13 @@ class RsiDailyTrend(Strategy):
             new_stop = bar_close + self.atr_stop_multiplier * atr
             if new_stop < state.trailing_stop:
                 state.trailing_stop = new_stop
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    signals.append(Signal(
+                        action="BUY", symbol=symbol, quantity=current_qty,
+                        order_type="SL_M", stop_price=state.trailing_stop,
+                        product_type=state.product_type,
+                    ))
 
         # Partial cover: RSI drops below partial threshold
         if (
@@ -412,10 +426,20 @@ class RsiDailyTrend(Strategy):
             if cover_qty > 0:
                 signals.append(Signal(
                     action="BUY", symbol=symbol, quantity=cover_qty,
-                    product_type="MIS",
+                    product_type=state.product_type,
                 ))
                 state.partial_taken = True
                 state.total_qty -= cover_qty
+                # Replace stop at breakeven for remaining
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    remaining = current_qty - cover_qty
+                    signals.append(Signal(
+                        action="BUY", symbol=symbol, quantity=remaining,
+                        order_type="SL_M", stop_price=state.avg_entry_price,
+                        product_type=state.product_type,
+                    ))
+                    state.trailing_stop = state.avg_entry_price
 
         # Check full cover conditions
         else:
@@ -431,16 +455,6 @@ class RsiDailyTrend(Strategy):
                 if ema is not None:
                     should_full_exit = True
 
-            # Trailing stop exit: price rises above trailing stop
-            if state.trailing_stop > 0 and bar_close >= state.trailing_stop:
-                should_full_exit = True
-
-            # Max loss stop: price rises too much above entry
-            if state.avg_entry_price > 0:
-                max_loss_price = state.avg_entry_price * (1 + self.max_loss_pct)
-                if bar_close >= max_loss_price:
-                    should_full_exit = True
-
             # Time stop: held too long with insufficient gain
             bars_held = state.bar_count - state.entry_bar
             if bars_held > self.max_hold_bars and state.avg_entry_price > 0:
@@ -450,10 +464,139 @@ class RsiDailyTrend(Strategy):
                     should_full_exit = True
 
             if should_full_exit and current_qty > 0:
+                # Cancel engine stop before market exit
+                if state.has_engine_stop:
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    state.has_engine_stop = False
                 signals.append(Signal(
                     action="BUY", symbol=symbol, quantity=current_qty,
-                    product_type="MIS",
+                    product_type=state.product_type,
                 ))
+                self._reset_state(state)
+
+    def _process_fill_detection(
+        self, state: SymbolState, symbol: str, snapshot: MarketSnapshot,
+        signals: list[Signal],
+    ) -> None:
+        """Detect entry fills and stop-loss hits from snapshot.fills.
+
+        Called before entry/exit processing each bar.
+        - Entry fill (flat + pending): set direction, submit engine SL-M
+        - Pyramid fill (in position + pending): update avg_entry, replace SL-M
+        - Stale limit cancel: after 3 bars unfilled
+        - Stop-hit detection: SL-M fill resets state
+        """
+        # --- Check for entry fills ---
+        if state.pending_entry_bar > 0:
+            if state.direction == "flat":
+                # Check for long entry fill (BUY)
+                entry_fill = next(
+                    (f for f in snapshot.fills if f.symbol == symbol and f.side == "BUY"),
+                    None,
+                )
+                if entry_fill:
+                    state.pending_entry_bar = 0
+                    state.direction = "long"
+                    state.avg_entry_price = entry_fill.fill_price
+                    state.total_qty = entry_fill.quantity
+                    state.pyramid_level = 1
+                    state.entry_bar = state.bar_count
+                    state.partial_taken = False
+                    # Submit engine SL-M stop
+                    stop_price = state.avg_entry_price * (1 - self.max_loss_pct)
+                    signals.append(Signal(
+                        action="SELL", symbol=symbol, quantity=state.total_qty,
+                        order_type="SL_M", stop_price=stop_price,
+                        product_type=state.product_type,
+                    ))
+                    state.has_engine_stop = True
+                    state.trailing_stop = stop_price
+
+                # Check for short entry fill (SELL)
+                if state.direction == "flat":
+                    entry_fill = next(
+                        (f for f in snapshot.fills if f.symbol == symbol and f.side == "SELL"),
+                        None,
+                    )
+                    if entry_fill:
+                        state.pending_entry_bar = 0
+                        state.direction = "short"
+                        state.avg_entry_price = entry_fill.fill_price
+                        state.total_qty = entry_fill.quantity
+                        state.pyramid_level = 1
+                        state.entry_bar = state.bar_count
+                        state.partial_taken = False
+                        # Submit engine SL-M stop for short (BUY to cover)
+                        stop_price = state.avg_entry_price * (1 + self.max_loss_pct)
+                        signals.append(Signal(
+                            action="BUY", symbol=symbol, quantity=state.total_qty,
+                            order_type="SL_M", stop_price=stop_price,
+                            product_type=state.product_type,
+                        ))
+                        state.has_engine_stop = True
+                        state.trailing_stop = stop_price
+
+            elif state.direction == "long":
+                # Check for pyramid fill (BUY)
+                pyramid_fill = next(
+                    (f for f in snapshot.fills if f.symbol == symbol and f.side == "BUY"),
+                    None,
+                )
+                if pyramid_fill:
+                    state.pending_entry_bar = 0
+                    old_cost = state.avg_entry_price * state.total_qty
+                    new_cost = pyramid_fill.fill_price * pyramid_fill.quantity
+                    state.total_qty += pyramid_fill.quantity
+                    state.avg_entry_price = (old_cost + new_cost) / state.total_qty
+                    state.pyramid_level += 1
+                    # Replace engine SL-M for new total qty
+                    if state.has_engine_stop:
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    stop_price = state.avg_entry_price * (1 - self.max_loss_pct)
+                    signals.append(Signal(
+                        action="SELL", symbol=symbol, quantity=state.total_qty,
+                        order_type="SL_M", stop_price=stop_price,
+                        product_type=state.product_type,
+                    ))
+                    state.has_engine_stop = True
+                    state.trailing_stop = max(state.trailing_stop, stop_price)
+
+            elif state.direction == "short":
+                # Check for pyramid fill (SELL)
+                pyramid_fill = next(
+                    (f for f in snapshot.fills if f.symbol == symbol and f.side == "SELL"),
+                    None,
+                )
+                if pyramid_fill:
+                    state.pending_entry_bar = 0
+                    old_cost = state.avg_entry_price * state.total_qty
+                    new_cost = pyramid_fill.fill_price * pyramid_fill.quantity
+                    state.total_qty += pyramid_fill.quantity
+                    state.avg_entry_price = (old_cost + new_cost) / state.total_qty
+                    state.pyramid_level += 1
+                    # Replace engine SL-M for new total qty
+                    if state.has_engine_stop:
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    stop_price = state.avg_entry_price * (1 + self.max_loss_pct)
+                    signals.append(Signal(
+                        action="BUY", symbol=symbol, quantity=state.total_qty,
+                        order_type="SL_M", stop_price=stop_price,
+                        product_type=state.product_type,
+                    ))
+                    state.has_engine_stop = True
+                    state.trailing_stop = min(state.trailing_stop, stop_price)
+
+        # --- Cancel stale entry after 3 bars ---
+        if state.pending_entry_bar > 0 and state.bar_count - state.pending_entry_bar > 3:
+            signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+            state.pending_entry_bar = 0
+
+        # --- Check for stop-hit (SL-M fill detected) ---
+        if state.has_engine_stop and state.direction != "flat":
+            side = "SELL" if state.direction == "long" else "BUY"
+            stop_hit = any(f.symbol == symbol and f.side == side for f in snapshot.fills)
+            if stop_hit:
+                state.has_engine_stop = False
                 self._reset_state(state)
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
@@ -477,7 +620,10 @@ class RsiDailyTrend(Strategy):
             state = self._get_state(symbol)
             state.bar_count += 1
 
-            # Reconcile position with portfolio
+            # --- Fill detection (before entries/exits) ---
+            self._process_fill_detection(state, symbol, snapshot, signals)
+
+            # Reconcile position with portfolio (only if not reset by stop-hit)
             if state.direction == "long":
                 held = self._held_qty(symbol, snapshot)
                 if held == 0:
@@ -524,7 +670,7 @@ class RsiDailyTrend(Strategy):
                 self._process_long_entries(
                     state, symbol, bar.close, rsi, trend_up, atr, level_qty, signals,
                 )
-                if state.direction == "flat":
+                if state.direction == "flat" and state.pending_entry_bar == 0:
                     self._process_short_entries(
                         state, symbol, bar.close, rsi, trend_down, atr, level_qty, signals,
                     )
