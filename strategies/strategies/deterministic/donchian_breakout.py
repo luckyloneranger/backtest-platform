@@ -8,21 +8,25 @@ Long Rules:
 - BUY when 15-min close breaks above N-day channel high with volume confirmation
 - Risk-based position sizing: qty = int((cash * risk_per_trade) / (ATR * atr_multiplier))
 - Pyramiding: up to 2 add-on entries when price moves 1*ATR above avg entry
-- Partial profit: exit 1/3 of position at profit_target_atr * ATR, move stop to breakeven
-- Trailing stop: 1.5 * ATR from highest price since entry (tighter than classic 2.0)
-- Channel low exit: price < N-day low -> full exit
-- Max loss stop: price < avg_entry * (1 - max_loss_pct) -> full exit
+- Engine SL-M stop at trailing stop level, engine LIMIT sell at profit target
+- Trailing stop ratchet: cancel + resubmit SL-M when stop moves up
+- Partial profit: LIMIT sell 1/3 at profit_target_atr * ATR, move stop to breakeven
+- Channel low exit: price < N-day low -> cancel engine orders + full exit
+- Max loss stop: price < avg_entry * (1 - max_loss_pct) -> cancel + full exit
 - Time stop: exit after max_hold_bars if gain < 0.5%
+- Dynamic CNC/MIS: CNC if volume > 1.5x average, MIS otherwise
 
 Short Rules:
 - SELL when 15-min close breaks below N-day channel low with volume confirmation
 - Risk-based position sizing: same formula as long
 - Pyramiding: up to 2 add-on entries when price moves 1*ATR below avg entry
-- Partial cover: cover 1/3 at avg_entry - profit_target_atr * ATR, move stop to breakeven
-- Trailing stop: 1.5 * ATR from lowest price since entry (moves down only)
-- Channel high exit: price > N-day high -> full cover
-- Max loss stop: price > avg_entry * (1 + max_loss_pct) -> full cover
+- Engine SL-M BUY at trailing stop above entry, engine LIMIT BUY for partial cover
+- Trailing stop ratchet: cancel + resubmit SL-M when stop moves down
+- Partial cover: LIMIT BUY 1/3 at avg_entry - profit_target_atr * ATR, stop to breakeven
+- Channel high exit: price > N-day high -> cancel + full cover
+- Max loss stop: price > avg_entry * (1 + max_loss_pct) -> cancel + full cover
 - Time stop: cover after max_hold_bars if gain < 0.5%
+- Dynamic CNC/MIS: CNC if volume > 1.5x average, MIS otherwise
 
 Config params:
 - channel_period: Donchian channel lookback (default 20 days)
@@ -45,7 +49,7 @@ from strategies.indicators import compute_atr
 
 @register("donchian_breakout")
 class DonchianBreakout(Strategy):
-    """Donchian Channel Breakout with risk sizing, partial profits, pyramiding, and short selling."""
+    """Donchian Channel Breakout with engine stops, limit profits, dynamic CNC/MIS."""
 
     def required_data(self) -> list[dict]:
         return [
@@ -86,6 +90,11 @@ class DonchianBreakout(Strategy):
         self.partial_taken: dict[str, bool] = {}
         self.breakeven_stop: dict[str, bool] = {}
 
+        # Engine order tracking
+        self.has_profit_target: dict[str, bool] = {}
+        self.has_engine_stop: dict[str, bool] = {}
+        self.product_type: dict[str, str] = {}
+
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
         signals: list[Signal] = []
 
@@ -115,13 +124,35 @@ class DonchianBreakout(Strategy):
             self._ensure_state(symbol)
             self.bar_counter[symbol] += 1
 
-            # 2a. Reconcile position with portfolio
+            # 2a. Detect engine stop/profit fills BEFORE reconciliation
+            #     When the engine fills an SL-M or LIMIT order, the position
+            #     may already be gone (held_qty == 0). We must detect the fill
+            #     before reconciliation resets state and potentially re-enters.
             held_qty = 0
             for pos in snapshot.portfolio.positions:
                 if pos.symbol == symbol and pos.quantity != 0:
                     held_qty = pos.quantity
                     break
 
+            if self.in_position[symbol] and not self.is_short.get(symbol, False):
+                # Long position — check for SELL fills from engine orders
+                if self.has_engine_stop.get(symbol, False) or self.has_profit_target.get(symbol, False):
+                    sell_fill = any(f.symbol == symbol and f.side == "SELL" for f in snapshot.fills)
+                    if sell_fill and held_qty == 0:
+                        # Stop fill consumed all position — reset and skip
+                        self._reset_position(symbol)
+                        continue
+
+            elif self.in_position[symbol] and self.is_short.get(symbol, False):
+                # Short position — check for BUY fills from engine orders
+                if self.has_engine_stop.get(symbol, False) or self.has_profit_target.get(symbol, False):
+                    buy_fill = any(f.symbol == symbol and f.side == "BUY" for f in snapshot.fills)
+                    if buy_fill and held_qty == 0:
+                        # Stop fill consumed all position — reset and skip
+                        self._reset_position(symbol)
+                        continue
+
+            # 2a-bis. Reconcile position with portfolio
             if self.in_position[symbol] and held_qty == 0:
                 self._reset_position(symbol)
 
@@ -151,6 +182,10 @@ class DonchianBreakout(Strategy):
                     and volumes[-1] >= avg_volume * self.volume_factor
                 )
 
+                # Determine product type based on volume strength
+                volume_strong = volumes[-1] > avg_volume * 1.5 if volumes else False
+                product = "CNC" if volume_strong else "MIS"
+
                 if volume_ok and bar.close > channel_high:
                     # --- LONG ENTRY ---
                     risk_amount = atr * self.atr_multiplier
@@ -161,9 +196,10 @@ class DonchianBreakout(Strategy):
                         qty = (qty // inst.lot_size) * inst.lot_size
 
                     if qty > 0:
+                        self.product_type[symbol] = product
                         signals.append(Signal(
                             action="BUY", symbol=symbol, quantity=qty,
-                            product_type="CNC",
+                            product_type=product,
                         ))
                         self.in_position[symbol] = True
                         self.is_short[symbol] = False
@@ -176,6 +212,8 @@ class DonchianBreakout(Strategy):
                         self.entry_bar[symbol] = self.bar_counter[symbol]
                         self.partial_taken[symbol] = False
                         self.breakeven_stop[symbol] = False
+                        self.has_engine_stop[symbol] = False
+                        self.has_profit_target[symbol] = False
 
                 elif volume_ok and bar.close < channel_low:
                     # --- SHORT ENTRY ---
@@ -187,9 +225,10 @@ class DonchianBreakout(Strategy):
                         qty = (qty // inst.lot_size) * inst.lot_size
 
                     if qty > 0:
+                        self.product_type[symbol] = product
                         signals.append(Signal(
                             action="SELL", symbol=symbol, quantity=qty,
-                            product_type="CNC",
+                            product_type=product,
                         ))
                         self.in_position[symbol] = True
                         self.is_short[symbol] = True
@@ -203,63 +242,59 @@ class DonchianBreakout(Strategy):
                         self.entry_bar[symbol] = self.bar_counter[symbol]
                         self.partial_taken[symbol] = False
                         self.breakeven_stop[symbol] = False
+                        self.has_engine_stop[symbol] = False
+                        self.has_profit_target[symbol] = False
 
             # 2e. POSITION MANAGEMENT
             elif not self.is_short[symbol]:
                 # ==================== LONG POSITION MANAGEMENT ====================
-                # Update highest since entry
+                product = self.product_type.get(symbol, "CNC")
+                avg_entry = self.avg_entry_price[symbol]
+
+                # --- Stop-hit detection ---
+                if self.has_engine_stop.get(symbol, False):
+                    stop_hit = any(f.symbol == symbol and f.side == "SELL" for f in snapshot.fills)
+                    if stop_hit and not self.has_profit_target.get(symbol, False):
+                        self.has_engine_stop[symbol] = False
+                        self._reset_position(symbol)
+                        continue
+
+                # --- Partial profit fill detection ---
+                if self.has_profit_target.get(symbol, False):
+                    partial_fill = any(f.symbol == symbol and f.side == "SELL" for f in snapshot.fills)
+                    if partial_fill:
+                        self.has_profit_target[symbol] = False
+                        self.partial_taken[symbol] = True
+                        # Cancel existing engine stop, resubmit at breakeven
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                        remaining_qty = held_qty
+                        signals.append(Signal(
+                            action="SELL", symbol=symbol, quantity=remaining_qty,
+                            order_type="SL_M", stop_price=avg_entry,
+                            product_type=product,
+                        ))
+                        self.trailing_stop[symbol] = avg_entry
+                        self.breakeven_stop[symbol] = True
+
+                # --- Update highest since entry ---
                 if bar.close > self.highest_since_entry[symbol]:
                     self.highest_since_entry[symbol] = bar.close
 
-                # Update trailing stop (only moves up)
+                # --- Trailing stop ratchet (cancel + resubmit) ---
                 if atr > 0:
                     new_stop = self.highest_since_entry[symbol] - (atr * self.atr_multiplier)
                     if new_stop > self.trailing_stop[symbol]:
                         self.trailing_stop[symbol] = new_stop
+                        if self.has_engine_stop.get(symbol, False):
+                            signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                            signals.append(Signal(
+                                action="SELL", symbol=symbol, quantity=held_qty,
+                                order_type="SL_M", stop_price=self.trailing_stop[symbol],
+                                product_type=product,
+                            ))
 
-                avg_entry = self.avg_entry_price[symbol]
-
-                # --- Partial profit exit ---
-                if (
-                    not self.partial_taken[symbol]
-                    and atr > 0
-                    and bar.close >= avg_entry + self.profit_target_atr * atr
-                    and held_qty > 0
-                ):
-                    partial_qty = max(1, held_qty // 3)
-                    signals.append(Signal(
-                        action="SELL", symbol=symbol, quantity=partial_qty,
-                        product_type="CNC",
-                    ))
-                    self.partial_taken[symbol] = True
-                    self.trailing_stop[symbol] = avg_entry
-                    self.breakeven_stop[symbol] = True
-                    continue
-
-                # --- Pyramid entry ---
-                if (
-                    atr > 0
-                    and self.pyramid_count[symbol] < self.pyramid_levels
-                    and bar.close > avg_entry + atr
-                ):
-                    add_qty = max(1, self.original_qty[symbol] // 2)
-                    signals.append(Signal(
-                        action="BUY", symbol=symbol, quantity=add_qty,
-                        product_type="CNC",
-                    ))
-                    total_qty = held_qty + add_qty
-                    self.avg_entry_price[symbol] = (
-                        (avg_entry * held_qty + bar.close * add_qty) / total_qty
-                        if total_qty > 0 else avg_entry
-                    )
-                    self.pyramid_count[symbol] += 1
-                    continue
-
-                # --- EXIT CHECKS ---
+                # --- EXIT CHECKS (channel low, max loss, time stop) ---
                 should_exit = False
-
-                if bar.close <= self.trailing_stop[symbol]:
-                    should_exit = True
 
                 if bar.close < channel_low:
                     should_exit = True
@@ -274,71 +309,106 @@ class DonchianBreakout(Strategy):
                         should_exit = True
 
                 if should_exit and held_qty > 0:
+                    # Cancel all pending engine orders first
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    self.has_engine_stop[symbol] = False
+                    self.has_profit_target[symbol] = False
                     signals.append(Signal(
                         action="SELL", symbol=symbol, quantity=held_qty,
-                        product_type="CNC",
+                        product_type=product,
                     ))
                     self._reset_position(symbol)
-
-            else:
-                # ==================== SHORT POSITION MANAGEMENT ====================
-                abs_held = abs(held_qty)
-
-                # Update lowest since entry (tracks in favour of short)
-                if bar.close < self.lowest_since_entry[symbol]:
-                    self.lowest_since_entry[symbol] = bar.close
-
-                # Update trailing stop (only moves DOWN for shorts)
-                if atr > 0:
-                    new_stop = self.lowest_since_entry[symbol] + (atr * self.atr_multiplier)
-                    if new_stop < self.trailing_stop[symbol]:
-                        self.trailing_stop[symbol] = new_stop
-
-                avg_entry = self.avg_entry_price[symbol]
-
-                # --- Partial cover (take profit on short) ---
-                if (
-                    not self.partial_taken[symbol]
-                    and atr > 0
-                    and bar.close <= avg_entry - self.profit_target_atr * atr
-                    and abs_held > 0
-                ):
-                    partial_qty = max(1, abs_held // 3)
-                    signals.append(Signal(
-                        action="BUY", symbol=symbol, quantity=partial_qty,
-                        product_type="CNC",
-                    ))
-                    self.partial_taken[symbol] = True
-                    # Move trailing stop to breakeven (avg entry)
-                    self.trailing_stop[symbol] = avg_entry
-                    self.breakeven_stop[symbol] = True
                     continue
 
-                # --- Pyramid (add to short) ---
+                # --- Submit engine stop + profit target (first bar after entry) ---
+                if not self.has_engine_stop.get(symbol, False) and held_qty > 0:
+                    if atr > 0:
+                        signals.append(Signal(
+                            action="SELL", symbol=symbol, quantity=held_qty,
+                            order_type="SL_M", stop_price=self.trailing_stop[symbol],
+                            product_type=product,
+                        ))
+                        self.has_engine_stop[symbol] = True
+
+                        if not self.partial_taken.get(symbol, False):
+                            partial_qty = max(1, held_qty // 3)
+                            profit_price = avg_entry + self.profit_target_atr * atr
+                            signals.append(Signal(
+                                action="SELL", symbol=symbol, quantity=partial_qty,
+                                order_type="LIMIT", limit_price=profit_price,
+                                product_type=product,
+                            ))
+                            self.has_profit_target[symbol] = True
+
+                # --- Pyramid entry ---
                 if (
                     atr > 0
                     and self.pyramid_count[symbol] < self.pyramid_levels
-                    and bar.close < avg_entry - atr
+                    and bar.close > avg_entry + atr
                 ):
                     add_qty = max(1, self.original_qty[symbol] // 2)
                     signals.append(Signal(
-                        action="SELL", symbol=symbol, quantity=add_qty,
-                        product_type="CNC",
+                        action="BUY", symbol=symbol, quantity=add_qty,
+                        product_type=product,
                     ))
-                    total_qty = abs_held + add_qty
+                    total_qty = held_qty + add_qty
                     self.avg_entry_price[symbol] = (
-                        (avg_entry * abs_held + bar.close * add_qty) / total_qty
+                        (avg_entry * held_qty + bar.close * add_qty) / total_qty
                         if total_qty > 0 else avg_entry
                     )
                     self.pyramid_count[symbol] += 1
                     continue
 
-                # --- SHORT EXIT CHECKS ---
-                should_cover = False
+            else:
+                # ==================== SHORT POSITION MANAGEMENT ====================
+                abs_held = abs(held_qty)
+                product = self.product_type.get(symbol, "CNC")
+                avg_entry = self.avg_entry_price[symbol]
 
-                # Trailing stop hit (price rises above stop)
-                if bar.close >= self.trailing_stop[symbol]:
-                    should_cover = True
+                # --- Stop-hit detection (short: BUY fill = stop hit) ---
+                if self.has_engine_stop.get(symbol, False):
+                    stop_hit = any(f.symbol == symbol and f.side == "BUY" for f in snapshot.fills)
+                    if stop_hit and not self.has_profit_target.get(symbol, False):
+                        self.has_engine_stop[symbol] = False
+                        self._reset_position(symbol)
+                        continue
+
+                # --- Partial cover fill detection (short: BUY fill = partial cover) ---
+                if self.has_profit_target.get(symbol, False):
+                    partial_fill = any(f.symbol == symbol and f.side == "BUY" for f in snapshot.fills)
+                    if partial_fill:
+                        self.has_profit_target[symbol] = False
+                        self.partial_taken[symbol] = True
+                        # Cancel existing engine stop, resubmit at breakeven
+                        signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                        remaining_qty = abs_held
+                        signals.append(Signal(
+                            action="BUY", symbol=symbol, quantity=remaining_qty,
+                            order_type="SL_M", stop_price=avg_entry,
+                            product_type=product,
+                        ))
+                        self.trailing_stop[symbol] = avg_entry
+                        self.breakeven_stop[symbol] = True
+
+                # --- Update lowest since entry (tracks in favour of short) ---
+                if bar.close < self.lowest_since_entry[symbol]:
+                    self.lowest_since_entry[symbol] = bar.close
+
+                # --- Trailing stop ratchet (cancel + resubmit, only moves DOWN for shorts) ---
+                if atr > 0:
+                    new_stop = self.lowest_since_entry[symbol] + (atr * self.atr_multiplier)
+                    if new_stop < self.trailing_stop[symbol]:
+                        self.trailing_stop[symbol] = new_stop
+                        if self.has_engine_stop.get(symbol, False):
+                            signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                            signals.append(Signal(
+                                action="BUY", symbol=symbol, quantity=abs_held,
+                                order_type="SL_M", stop_price=self.trailing_stop[symbol],
+                                product_type=product,
+                            ))
+
+                # --- SHORT EXIT CHECKS (channel high, max loss, time stop) ---
+                should_cover = False
 
                 # Channel high breakout (trend reversal)
                 if bar.close > channel_high:
@@ -357,11 +427,55 @@ class DonchianBreakout(Strategy):
                         should_cover = True
 
                 if should_cover and abs_held > 0:
+                    # Cancel all pending engine orders first
+                    signals.append(Signal(action="CANCEL", symbol=symbol, quantity=0))
+                    self.has_engine_stop[symbol] = False
+                    self.has_profit_target[symbol] = False
                     signals.append(Signal(
                         action="BUY", symbol=symbol, quantity=abs_held,
-                        product_type="CNC",
+                        product_type=product,
                     ))
                     self._reset_position(symbol)
+                    continue
+
+                # --- Submit engine stop + profit target (first bar after entry) ---
+                if not self.has_engine_stop.get(symbol, False) and abs_held > 0:
+                    if atr > 0:
+                        signals.append(Signal(
+                            action="BUY", symbol=symbol, quantity=abs_held,
+                            order_type="SL_M", stop_price=self.trailing_stop[symbol],
+                            product_type=product,
+                        ))
+                        self.has_engine_stop[symbol] = True
+
+                        if not self.partial_taken.get(symbol, False):
+                            partial_qty = max(1, abs_held // 3)
+                            profit_price = avg_entry - self.profit_target_atr * atr
+                            signals.append(Signal(
+                                action="BUY", symbol=symbol, quantity=partial_qty,
+                                order_type="LIMIT", limit_price=profit_price,
+                                product_type=product,
+                            ))
+                            self.has_profit_target[symbol] = True
+
+                # --- Pyramid (add to short) ---
+                if (
+                    atr > 0
+                    and self.pyramid_count[symbol] < self.pyramid_levels
+                    and bar.close < avg_entry - atr
+                ):
+                    add_qty = max(1, self.original_qty[symbol] // 2)
+                    signals.append(Signal(
+                        action="SELL", symbol=symbol, quantity=add_qty,
+                        product_type=product,
+                    ))
+                    total_qty = abs_held + add_qty
+                    self.avg_entry_price[symbol] = (
+                        (avg_entry * abs_held + bar.close * add_qty) / total_qty
+                        if total_qty > 0 else avg_entry
+                    )
+                    self.pyramid_count[symbol] += 1
+                    continue
 
         return signals
 
@@ -387,6 +501,9 @@ class DonchianBreakout(Strategy):
         self.entry_bar[symbol] = 0
         self.partial_taken[symbol] = False
         self.breakeven_stop[symbol] = False
+        self.has_engine_stop[symbol] = False
+        self.has_profit_target[symbol] = False
+        self.product_type[symbol] = "CNC"
 
     def on_complete(self) -> dict:
         return {
