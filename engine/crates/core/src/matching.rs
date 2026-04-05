@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::{Action, Bar, OrderType, ProductType, Signal};
+use crate::types::{Action, Bar, OrderType, OrderValidity, ProductType, Signal};
 
 // ── Side ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +21,9 @@ pub struct Order {
     pub limit_price: f64,
     pub stop_price: f64,
     pub product_type: ProductType,
+    pub trigger_price: f64,
+    pub validity: OrderValidity,
+    pub order_id: u64,
 }
 
 impl Order {
@@ -33,6 +36,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -45,6 +51,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -57,6 +66,9 @@ impl Order {
             limit_price: price,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -69,6 +81,9 @@ impl Order {
             limit_price: price,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -81,6 +96,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: stop,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -93,6 +111,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: stop,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -105,6 +126,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: stop,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -117,6 +141,9 @@ impl Order {
             limit_price: 0.0,
             stop_price: stop,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            order_id: 0,
         }
     }
 
@@ -136,6 +163,9 @@ impl Order {
             limit_price: signal.limit_price,
             stop_price: signal.stop_price,
             product_type: signal.product_type,
+            trigger_price: signal.trigger_price,
+            validity: signal.validity,
+            order_id: 0,
         }
     }
 }
@@ -183,6 +213,7 @@ pub struct PendingOrderInfo {
     pub order_type: OrderType,
     pub limit_price: f64,
     pub stop_price: f64,
+    pub order_id: u64,
 }
 
 impl PendingOrderInfo {
@@ -194,6 +225,7 @@ impl PendingOrderInfo {
             order_type: order.order_type,
             limit_price: order.limit_price,
             stop_price: order.stop_price,
+            order_id: order.order_id,
         }
     }
 }
@@ -205,6 +237,7 @@ pub struct OrderMatcher {
     slippage_pct: f64,
     circuit_limits: HashMap<String, CircuitLimits>,
     max_volume_pct: f64,
+    next_order_id: u64,
 }
 
 impl OrderMatcher {
@@ -214,6 +247,7 @@ impl OrderMatcher {
             slippage_pct,
             circuit_limits: HashMap::new(),
             max_volume_pct,
+            next_order_id: 1,
         }
     }
 
@@ -230,6 +264,20 @@ impl OrderMatcher {
         }
         self.pending = remaining;
         cancelled
+    }
+
+    /// Remove and return a specific pending order by its order_id.
+    pub fn cancel_order(&mut self, order_id: u64) -> Option<Order> {
+        if let Some(pos) = self.pending.iter().position(|o| o.order_id == order_id) {
+            Some(self.pending.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Drain and return all pending orders.
+    pub fn cancel_all_pending(&mut self) -> Vec<Order> {
+        self.pending.drain(..).collect()
     }
 
     /// Read-only access to all pending orders.
@@ -250,7 +298,9 @@ impl OrderMatcher {
         }
     }
 
-    pub fn submit(&mut self, order: Order) {
+    pub fn submit(&mut self, mut order: Order) {
+        order.order_id = self.next_order_id;
+        self.next_order_id += 1;
         self.pending.push(order);
     }
 
@@ -375,62 +425,174 @@ impl OrderMatcher {
                     }
                 }
 
-                // ── Stop-loss orders (SL): fill at stop_price with gap handling ──
+                // ── Stop-loss orders (SL): two-price model with trigger + limit ──
                 (OrderType::Sl, Side::Sell) => {
-                    if bar.low <= order.stop_price {
-                        // Gap: if bar opens at or below stop, fill at open with slippage
-                        let price = if bar.open <= order.stop_price {
-                            bar.open * (1.0 - self.slippage_pct)
+                    let trigger = if order.trigger_price > 0.0 { order.trigger_price } else { order.stop_price };
+                    if bar.low <= trigger {
+                        // Triggered! Now check limit fill
+                        let limit = order.limit_price;
+                        if limit > 0.0 && order.trigger_price > 0.0 {
+                            // Two-price model: trigger_price triggers, limit_price determines fill
+                            if bar.open <= limit {
+                                // Gapped through limit -- fill at bar.open
+                                let price = bar.open;
+                                if self.within_circuit_limits(&order.symbol, price) {
+                                    fills.push(Fill {
+                                        symbol: order.symbol,
+                                        side: Side::Sell,
+                                        quantity: order.quantity,
+                                        fill_price: price,
+                                        timestamp_ms: bar.timestamp_ms,
+                                        product_type: order.product_type,
+                                        costs: 0.0,
+                                    });
+                                } else {
+                                    rejections.push(OrderRejection {
+                                        symbol: order.symbol,
+                                        side: order.side,
+                                        quantity: order.quantity,
+                                        reason: "CIRCUIT_LIMIT".into(),
+                                    });
+                                }
+                            } else if bar.low <= limit {
+                                // Price reached limit -- fill at limit
+                                let price = limit;
+                                if self.within_circuit_limits(&order.symbol, price) {
+                                    fills.push(Fill {
+                                        symbol: order.symbol,
+                                        side: Side::Sell,
+                                        quantity: order.quantity,
+                                        fill_price: price,
+                                        timestamp_ms: bar.timestamp_ms,
+                                        product_type: order.product_type,
+                                        costs: 0.0,
+                                    });
+                                } else {
+                                    rejections.push(OrderRejection {
+                                        symbol: order.symbol,
+                                        side: order.side,
+                                        quantity: order.quantity,
+                                        reason: "CIRCUIT_LIMIT".into(),
+                                    });
+                                }
+                            } else {
+                                // Triggered but price didn't reach limit -- convert to pending limit
+                                let mut converted = order;
+                                converted.order_type = OrderType::Limit;
+                                converted.trigger_price = 0.0;
+                                remaining.push(converted);
+                            }
                         } else {
-                            order.stop_price
-                        };
-                        if self.within_circuit_limits(&order.symbol, price) {
-                            fills.push(Fill {
-                                symbol: order.symbol,
-                                side: Side::Sell,
-                                quantity: order.quantity,
-                                fill_price: price,
-                                timestamp_ms: bar.timestamp_ms,
-                                product_type: order.product_type,
-                                costs: 0.0,
-                            });
-                        } else {
-                            rejections.push(OrderRejection {
-                                symbol: order.symbol,
-                                side: order.side,
-                                quantity: order.quantity,
-                                reason: "CIRCUIT_LIMIT".into(),
-                            });
+                            // No two-price: old behavior -- fill at trigger or bar.open on gap
+                            let price = if bar.open <= trigger {
+                                bar.open * (1.0 - self.slippage_pct)
+                            } else {
+                                trigger
+                            };
+                            if self.within_circuit_limits(&order.symbol, price) {
+                                fills.push(Fill {
+                                    symbol: order.symbol,
+                                    side: Side::Sell,
+                                    quantity: order.quantity,
+                                    fill_price: price,
+                                    timestamp_ms: bar.timestamp_ms,
+                                    product_type: order.product_type,
+                                    costs: 0.0,
+                                });
+                            } else {
+                                rejections.push(OrderRejection {
+                                    symbol: order.symbol,
+                                    side: order.side,
+                                    quantity: order.quantity,
+                                    reason: "CIRCUIT_LIMIT".into(),
+                                });
+                            }
                         }
                     } else {
                         remaining.push(order);
                     }
                 }
                 (OrderType::Sl, Side::Buy) => {
-                    if bar.high >= order.stop_price {
-                        // Gap: if bar opens at or above stop, fill at open with slippage
-                        let price = if bar.open >= order.stop_price {
-                            bar.open * (1.0 + self.slippage_pct)
+                    let trigger = if order.trigger_price > 0.0 { order.trigger_price } else { order.stop_price };
+                    if bar.high >= trigger {
+                        // Triggered! Now check limit fill
+                        let limit = order.limit_price;
+                        if limit > 0.0 && order.trigger_price > 0.0 {
+                            // Two-price model: trigger_price triggers, limit_price determines fill
+                            if bar.open >= limit {
+                                // Gapped through limit -- fill at bar.open
+                                let price = bar.open;
+                                if self.within_circuit_limits(&order.symbol, price) {
+                                    fills.push(Fill {
+                                        symbol: order.symbol,
+                                        side: Side::Buy,
+                                        quantity: order.quantity,
+                                        fill_price: price,
+                                        timestamp_ms: bar.timestamp_ms,
+                                        product_type: order.product_type,
+                                        costs: 0.0,
+                                    });
+                                } else {
+                                    rejections.push(OrderRejection {
+                                        symbol: order.symbol,
+                                        side: order.side,
+                                        quantity: order.quantity,
+                                        reason: "CIRCUIT_LIMIT".into(),
+                                    });
+                                }
+                            } else if bar.high >= limit {
+                                // Price reached limit -- fill at limit
+                                let price = limit;
+                                if self.within_circuit_limits(&order.symbol, price) {
+                                    fills.push(Fill {
+                                        symbol: order.symbol,
+                                        side: Side::Buy,
+                                        quantity: order.quantity,
+                                        fill_price: price,
+                                        timestamp_ms: bar.timestamp_ms,
+                                        product_type: order.product_type,
+                                        costs: 0.0,
+                                    });
+                                } else {
+                                    rejections.push(OrderRejection {
+                                        symbol: order.symbol,
+                                        side: order.side,
+                                        quantity: order.quantity,
+                                        reason: "CIRCUIT_LIMIT".into(),
+                                    });
+                                }
+                            } else {
+                                // Triggered but price didn't reach limit -- convert to pending limit
+                                let mut converted = order;
+                                converted.order_type = OrderType::Limit;
+                                converted.trigger_price = 0.0;
+                                remaining.push(converted);
+                            }
                         } else {
-                            order.stop_price
-                        };
-                        if self.within_circuit_limits(&order.symbol, price) {
-                            fills.push(Fill {
-                                symbol: order.symbol,
-                                side: Side::Buy,
-                                quantity: order.quantity,
-                                fill_price: price,
-                                timestamp_ms: bar.timestamp_ms,
-                                product_type: order.product_type,
-                                costs: 0.0,
-                            });
-                        } else {
-                            rejections.push(OrderRejection {
-                                symbol: order.symbol,
-                                side: order.side,
-                                quantity: order.quantity,
-                                reason: "CIRCUIT_LIMIT".into(),
-                            });
+                            // No two-price: old behavior -- fill at trigger or bar.open on gap
+                            let price = if bar.open >= trigger {
+                                bar.open * (1.0 + self.slippage_pct)
+                            } else {
+                                trigger
+                            };
+                            if self.within_circuit_limits(&order.symbol, price) {
+                                fills.push(Fill {
+                                    symbol: order.symbol,
+                                    side: Side::Buy,
+                                    quantity: order.quantity,
+                                    fill_price: price,
+                                    timestamp_ms: bar.timestamp_ms,
+                                    product_type: order.product_type,
+                                    costs: 0.0,
+                                });
+                            } else {
+                                rejections.push(OrderRejection {
+                                    symbol: order.symbol,
+                                    side: order.side,
+                                    quantity: order.quantity,
+                                    reason: "CIRCUIT_LIMIT".into(),
+                                });
+                            }
                         }
                     } else {
                         remaining.push(order);
@@ -513,6 +675,9 @@ impl OrderMatcher {
                         limit_price: 0.0,
                         stop_price: 0.0,
                         product_type: fill.product_type,
+                        trigger_price: 0.0,
+                        validity: OrderValidity::default(),
+                        order_id: 0,
                     };
                     self.pending.push(remainder);
                 }
@@ -520,6 +685,9 @@ impl OrderMatcher {
             }
             fills = clamped_fills;
         }
+
+        // Auto-cancel unfilled IOC orders
+        self.pending.retain(|o| o.validity != OrderValidity::Ioc);
 
         (fills, rejections)
     }
@@ -795,6 +963,9 @@ mod tests {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            cancel_order_id: 0,
         };
         let _ = Order::from_signal(&hold_signal);
     }
@@ -812,6 +983,9 @@ mod tests {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            cancel_order_id: 0,
         };
         let _ = Order::from_signal(&cancel_signal);
     }
@@ -1055,5 +1229,165 @@ mod tests {
         assert_eq!(fills[0].quantity, 1000,
             "with max_pct=1.0, full order should fill regardless of volume");
         assert!(matcher.pending_orders().is_empty());
+    }
+
+    // ── IOC validity tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_ioc_unfilled_cancelled() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        let mut order = Order::limit_buy("TEST", 10, 90.0);
+        order.validity = OrderValidity::Ioc;
+        matcher.submit(order);
+
+        // Bar where low=95 does NOT touch limit=90 -> no fill, IOC should be auto-cancelled
+        let bar = make_bar("TEST", 100.0, 105.0, 95.0, 102.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert!(fills.is_empty(), "IOC limit order should not fill");
+        assert!(matcher.pending_orders().is_empty(),
+            "unfilled IOC order should be auto-cancelled after process_bar");
+    }
+
+    #[test]
+    fn test_ioc_filled_not_cancelled() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        let mut order = Order::limit_buy("TEST", 10, 100.0);
+        order.validity = OrderValidity::Ioc;
+        matcher.submit(order);
+
+        // Bar where low=95 touches limit=100 -> fills
+        let bar = make_bar("TEST", 102.0, 105.0, 95.0, 101.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1, "IOC limit order should fill when price touches");
+        assert!((fills[0].fill_price - 100.0).abs() < f64::EPSILON);
+    }
+
+    // ── SL two-price model tests ──────────────────────────────────────
+
+    #[test]
+    fn test_sl_two_price_fill_at_limit() {
+        // trigger=100, limit=99, bar touches 98 -> fill at 99
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        let mut order = Order::stop_loss_sell("TEST", 10, 100.0);
+        order.trigger_price = 100.0;
+        order.limit_price = 99.0;
+        matcher.submit(order);
+
+        // Bar: open=101, high=102, low=98, close=99
+        // low=98 <= trigger=100, triggers. low=98 <= limit=99, fills at 99.
+        let bar = make_bar("TEST", 101.0, 102.0, 98.0, 99.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 99.0).abs() < f64::EPSILON,
+            "SL two-price should fill at limit=99, got {}", fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_two_price_gap_through() {
+        // trigger=100, limit=99, bar opens at 95 -> fill at 95 (gapped through)
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        let mut order = Order::stop_loss_sell("TEST", 10, 100.0);
+        order.trigger_price = 100.0;
+        order.limit_price = 99.0;
+        matcher.submit(order);
+
+        // Bar: open=95, high=96, low=94, close=95 — gapped through both trigger and limit
+        let bar = make_bar("TEST", 95.0, 96.0, 94.0, 95.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 95.0).abs() < f64::EPSILON,
+            "SL two-price gap should fill at open=95, got {}", fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_two_price_trigger_no_fill() {
+        // trigger=100, limit=99, bar.low=99.5 -> triggered but no fill, becomes pending limit
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        let mut order = Order::stop_loss_sell("TEST", 10, 100.0);
+        order.trigger_price = 100.0;
+        order.limit_price = 99.0;
+        matcher.submit(order);
+
+        // Bar: open=101, high=102, low=99.5, close=100 — triggers (low <= 100) but low > limit 99
+        let bar = make_bar("TEST", 101.0, 102.0, 99.5, 100.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert!(fills.is_empty(), "SL two-price should not fill when price doesn't reach limit");
+        let pending = matcher.pending_orders();
+        assert_eq!(pending.len(), 1, "order should be converted to pending limit");
+        assert_eq!(pending[0].order_type, OrderType::Limit,
+            "triggered SL should convert to limit order");
+    }
+
+    #[test]
+    fn test_sl_backward_compat() {
+        // trigger_price=0, uses stop_price as trigger (existing behavior)
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::stop_loss_sell("TEST", 10, 100.0));
+
+        let bar = make_bar("TEST", 101.0, 102.0, 98.0, 99.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].fill_price - 100.0).abs() < f64::EPSILON,
+            "backward compat: SL should fill at stop_price=100, got {}", fills[0].fill_price);
+    }
+
+    // ── Per-order cancellation tests ──────────────────────────────────
+
+    #[test]
+    fn test_cancel_specific_order_by_id() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("TEST", 10, 100.0));
+        matcher.submit(Order::limit_buy("TEST", 5, 95.0));
+
+        let id1 = matcher.pending_orders()[0].order_id;
+        let _id2 = matcher.pending_orders()[1].order_id;
+
+        // Cancel only the first order
+        let cancelled = matcher.cancel_order(id1);
+        assert!(cancelled.is_some());
+        assert_eq!(cancelled.unwrap().quantity, 10);
+        assert_eq!(matcher.pending_orders().len(), 1);
+        assert_eq!(matcher.pending_orders()[0].quantity, 5);
+    }
+
+    #[test]
+    fn test_cancel_all_still_works() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("TEST", 10, 100.0));
+        matcher.submit(Order::limit_buy("TEST", 5, 95.0));
+
+        let cancelled = matcher.cancel_orders_for_symbol("TEST");
+        assert_eq!(cancelled.len(), 2);
+        assert!(matcher.pending_orders().is_empty());
+    }
+
+    #[test]
+    fn test_order_ids_sequential() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("A", 1, 100.0));
+        matcher.submit(Order::limit_buy("B", 2, 200.0));
+        matcher.submit(Order::limit_buy("C", 3, 300.0));
+
+        let pending = matcher.pending_orders();
+        assert_eq!(pending[0].order_id, 1);
+        assert_eq!(pending[1].order_id, 2);
+        assert_eq!(pending[2].order_id, 3);
+    }
+
+    #[test]
+    fn test_pending_order_info_has_id() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+        matcher.submit(Order::limit_buy("TEST", 10, 100.0));
+
+        let info = PendingOrderInfo::from_order(&matcher.pending_orders()[0]);
+        assert_eq!(info.order_id, 1);
+        assert_eq!(info.symbol, "TEST");
+        assert_eq!(info.quantity, 10);
     }
 }

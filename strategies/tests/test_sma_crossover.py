@@ -452,11 +452,18 @@ class TestShortEntryOnDeathCross:
         assert sell_signals[-1].quantity > 1, (
             f"Expected ATR-based sizing > 1, got {sell_signals[-1].quantity}"
         )
+        # Short entries must always use MIS (CNC shorts not allowed in Zerodha)
+        assert sell_signals[-1].product_type == "MIS", (
+            f"Short entry must use MIS, got {sell_signals[-1].product_type}"
+        )
 
         # Strategy should now be short (negative position_qty)
         state = s.states["TEST"]
         assert state.position_qty < 0, (
             f"Expected negative position_qty for short, got {state.position_qty}"
+        )
+        assert state.product_type == "MIS", (
+            f"Short position product_type must be MIS, got {state.product_type}"
         )
         assert state.has_engine_stop, "Should have engine SL-M stop after short entry fill"
         # Trailing stop should be above the lowest price seen (stop moves down with price)

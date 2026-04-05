@@ -507,8 +507,29 @@ impl BacktestEngine {
                 }
 
                 if signal.action == Action::Cancel {
-                    matcher.cancel_orders_for_symbol(&signal.symbol);
+                    if signal.cancel_order_id > 0 {
+                        matcher.cancel_order(signal.cancel_order_id);
+                    } else {
+                        matcher.cancel_orders_for_symbol(&signal.symbol);
+                    }
                 } else if signal.action != Action::Hold {
+                    // CNC short restriction: Zerodha does not allow short selling via CNC
+                    if signal.action == Action::Sell && signal.product_type == ProductType::Cnc {
+                        // Check if this is closing an existing long position
+                        let has_long = portfolio.positions_snapshot()
+                            .iter()
+                            .any(|(sym, _qty, is_short, _pt)| sym == &signal.symbol && !is_short);
+                        if !has_long {
+                            current_rejections.push(OrderRejection {
+                                symbol: signal.symbol.clone(),
+                                side: Side::Sell,
+                                quantity: signal.quantity,
+                                reason: "CNC_SHORT_NOT_ALLOWED".into(),
+                            });
+                            continue;
+                        }
+                    }
+
                     // Daily loss limit: reject Buy signals when daily limit hit
                     if daily_limit_hit && signal.action == Action::Buy {
                         current_rejections.push(OrderRejection {
@@ -1297,6 +1318,9 @@ mod tests {
                         limit_price: 0.0,
                         stop_price: 0.0,
                         product_type: ProductType::Mis,
+                        trigger_price: 0.0,
+                        validity: crate::types::OrderValidity::default(),
+                        cancel_order_id: 0,
                     }])
                 } else {
                     Ok(vec![])
@@ -2389,6 +2413,169 @@ mod tests {
         assert!(
             (result.final_equity - 1_000_000.0).abs() < 1.0,
             "no fills should occur for reference symbol"
+        );
+    }
+
+    // ── CNC Short Restriction Tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cnc_short_rejected() {
+        // Strategy that sends SELL CNC without any existing position — should be rejected.
+        struct CncShortStrategy {
+            call_count: AtomicUsize,
+        }
+        impl CncShortStrategy {
+            fn new() -> Self {
+                Self { call_count: AtomicUsize::new(0) }
+            }
+        }
+        #[async_trait]
+        impl StrategyClient for CncShortStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement { interval: "minute".into(), lookback: 200 }])
+            }
+            async fn initialize(&self, _: &str, _: &str, _: &[String], _: &[InstrumentData]) -> Result<()> { Ok(()) }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot.timeframes.values().next()
+                    .and_then(|m| m.keys().next().cloned()).unwrap_or_default();
+                if count == 2 {
+                    // Try to short via CNC (no existing position)
+                    Ok(vec![Signal::market_sell(&symbol, 10)])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        }
+
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| Bar {
+                timestamp_ms: i * 60000,
+                symbol: "TEST".into(),
+                open: 100.0, high: 102.0, low: 99.0, close: 101.0,
+                volume: 1000, oi: 0,
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement { interval: "minute".into(), lookback: 200 }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "cnc_short".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 200,
+                max_volume_pct: 1.0,
+                max_drawdown_pct: None,
+                daily_loss_limit: None,
+                max_position_qty: None,
+                max_exposure_pct: None,
+                reference_symbols: vec![],
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &CncShortStrategy::new(),
+            vec![],
+            &requirements,
+        ).await.unwrap();
+
+        // CNC short should be rejected — no trades should happen
+        assert!(result.trades.is_empty(), "CNC short should be rejected, no trades");
+        // Equity should remain unchanged
+        assert!(
+            (result.final_equity - 1_000_000.0).abs() < 1.0,
+            "no position should be opened for CNC short"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cnc_sell_closing_long_allowed() {
+        // Strategy that buys CNC on bar 2, then sells CNC on bar 5.
+        // The sell is closing an existing long position, so it should be allowed.
+        struct CncBuySellStrategy {
+            call_count: AtomicUsize,
+        }
+        impl CncBuySellStrategy {
+            fn new() -> Self {
+                Self { call_count: AtomicUsize::new(0) }
+            }
+        }
+        #[async_trait]
+        impl StrategyClient for CncBuySellStrategy {
+            async fn get_requirements(&self, _: &str, _: &str) -> Result<Vec<IntervalRequirement>> {
+                Ok(vec![IntervalRequirement { interval: "minute".into(), lookback: 200 }])
+            }
+            async fn initialize(&self, _: &str, _: &str, _: &[String], _: &[InstrumentData]) -> Result<()> { Ok(()) }
+            async fn on_bar(&self, snapshot: &MarketSnapshot) -> Result<Vec<Signal>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let symbol = snapshot.timeframes.values().next()
+                    .and_then(|m| m.keys().next().cloned()).unwrap_or_default();
+                if count == 2 {
+                    // Buy CNC
+                    Ok(vec![Signal::market_buy(&symbol, 10)])
+                } else if count == 5 {
+                    // Sell CNC (closing long position — should be allowed)
+                    Ok(vec![Signal::market_sell(&symbol, 10)])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn on_complete(&self) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        }
+
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| Bar {
+                timestamp_ms: i * 60000,
+                symbol: "TEST".into(),
+                open: 100.0 + i as f64, high: 102.0 + i as f64,
+                low: 99.0 + i as f64, close: 101.0 + i as f64,
+                volume: 1000, oi: 0,
+            })
+            .collect();
+
+        let mut bars_by_interval = HashMap::new();
+        bars_by_interval.insert("minute".to_string(), bars);
+        let requirements = vec![IntervalRequirement { interval: "minute".into(), lookback: 200 }];
+
+        let result = BacktestEngine::run(
+            BacktestConfig {
+                strategy_name: "cnc_close".into(),
+                symbols: vec!["TEST".into()],
+                start_date: "2024-01-01".into(),
+                end_date: "2024-01-02".into(),
+                initial_capital: 1_000_000.0,
+                interval: Interval::Minute,
+                strategy_params: serde_json::json!({}),
+                slippage_pct: 0.0,
+                margin_available: None,
+                lookback_window: 200,
+                max_volume_pct: 1.0,
+                max_drawdown_pct: None,
+                daily_loss_limit: None,
+                max_position_qty: None,
+                max_exposure_pct: None,
+                reference_symbols: vec![],
+            },
+            bars_by_interval,
+            HashMap::new(),
+            &CncBuySellStrategy::new(),
+            vec![],
+            &requirements,
+        ).await.unwrap();
+
+        // CNC sell closing a long should be allowed — one round-trip trade
+        assert_eq!(
+            result.trades.len(), 1,
+            "CNC sell closing long should go through, producing one trade"
         );
     }
 }

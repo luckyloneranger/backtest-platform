@@ -46,6 +46,18 @@ impl Default for ProductType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderValidity {
+    Day,
+    Ioc,
+}
+
+impl Default for OrderValidity {
+    fn default() -> Self {
+        OrderValidity::Day
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     Long,
     Short,
@@ -62,6 +74,12 @@ pub struct Signal {
     pub limit_price: f64,
     pub stop_price: f64,
     pub product_type: ProductType,
+    #[serde(default)]
+    pub trigger_price: f64,
+    #[serde(default)]
+    pub validity: OrderValidity,
+    #[serde(default)]
+    pub cancel_order_id: u64,
 }
 
 impl Signal {
@@ -75,6 +93,9 @@ impl Signal {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            cancel_order_id: 0,
         }
     }
 
@@ -88,6 +109,9 @@ impl Signal {
             limit_price: 0.0,
             stop_price: 0.0,
             product_type: ProductType::Cnc,
+            trigger_price: 0.0,
+            validity: OrderValidity::default(),
+            cancel_order_id: 0,
         }
     }
 }

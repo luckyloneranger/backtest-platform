@@ -310,6 +310,9 @@ impl StrategyClient for GrpcStrategyClient {
                     limit_price: s.limit_price,
                     stop_price: s.stop_price,
                     product_type,
+                    trigger_price: 0.0,
+                    validity: crate::types::OrderValidity::default(),
+                    cancel_order_id: 0,
                 }
             })
             .collect();

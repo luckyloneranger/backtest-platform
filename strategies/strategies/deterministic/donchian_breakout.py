@@ -217,6 +217,8 @@ class DonchianBreakout(Strategy):
 
                 elif volume_ok and bar.close < channel_low:
                     # --- SHORT ENTRY ---
+                    # Short entries always use MIS (CNC shorts not allowed in Zerodha)
+                    product = "MIS"
                     risk_amount = atr * self.atr_multiplier
                     qty = int((snapshot.portfolio.cash * self.risk_per_trade) / risk_amount) if risk_amount > 0 else 0
 

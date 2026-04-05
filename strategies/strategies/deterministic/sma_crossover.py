@@ -214,7 +214,8 @@ class SmaCrossover(Strategy):
                         if spread > self.min_spread and atr > 0:
                             qty = self._compute_qty(snapshot.context.initial_capital, atr)
                             if qty > 0:
-                                product = "CNC" if spread > self.cnc_spread_threshold else "MIS"
+                                # Short entries always use MIS (CNC shorts not allowed in Zerodha)
+                                product = "MIS"
                                 signals.append(
                                     Signal(
                                         action="SELL",

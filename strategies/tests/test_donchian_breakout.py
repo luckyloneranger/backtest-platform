@@ -363,7 +363,7 @@ def _enter_short_position(strategy, entry_price=90.0, volume_day=200_000):
 # ---- test_short_entry_on_channel_low_break ----
 
 def test_short_entry_on_channel_low_break():
-    """Price breaks below channel low with volume -> SELL signal (short entry)."""
+    """Price breaks below channel low with volume -> SELL signal (short entry) with MIS product type."""
     s = DonchianBreakout()
     s.initialize({
         "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
@@ -378,8 +378,15 @@ def test_short_entry_on_channel_low_break():
     sell_signals = [sig for sig in signals if sig.action == "SELL"]
     assert len(sell_signals) == 1
     assert sell_signals[0].quantity > 0
+    # Short entries must always use MIS (CNC shorts not allowed in Zerodha)
+    assert sell_signals[0].product_type == "MIS", (
+        f"Short entry must use MIS, got {sell_signals[0].product_type}"
+    )
     assert s.in_position["TEST"] is True
     assert s.is_short["TEST"] is True
+    assert s.product_type["TEST"] == "MIS", (
+        f"Short position product_type must be MIS, got {s.product_type['TEST']}"
+    )
 
     # Verify risk-based sizing
     atr = s.current_atr["TEST"]
