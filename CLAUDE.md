@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (95 tests)
+pytest tests/ -v                     # run strategy tests (161 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -62,7 +62,7 @@ Dependency flow: `cli → data → core → proto`
 
 - `strategies/base.py` — Abstract `Strategy` class with `required_data()`, `initialize()`, `on_bar()`, `on_complete()`. Also defines `MarketSnapshot`, `BarData`, `InstrumentInfo`, `FillInfo`, `OrderRejection`, `TradeInfo`, `SessionContext`, `PendingOrder`.
 - `strategies/position_manager.py` — Shared `PositionManager` class handling all order lifecycle: entries (LIMIT/MARKET), engine SL-M stops, trailing stop ratcheting, profit targets, fill detection, DAY expiry re-submission, portfolio reconciliation. Deterministic strategies use this instead of managing orders directly.
-- `strategies/indicators.py` — Shared technical indicators: `compute_sma`, `compute_ema`, `compute_rsi`, `compute_atr`.
+- `strategies/indicators.py` — Shared technical indicators backed by pandas-ta: `compute_sma`, `compute_ema`, `compute_rsi`, `compute_atr`, `compute_macd`, `compute_bollinger`, `compute_adx`, `compute_obv`, `compute_obv_slope`, `compute_stochastic`, `compute_bbw`, `compute_zscore`, `compute_correlation`, `compute_cointegration`, `compute_halflife`. All accept `list[float]`, return plain Python types. Strategies never import pandas-ta directly.
 - `strategies/llm_base.py` — `LLMStrategy` subclass of `Strategy`. Handles Azure OpenAI client init, snapshot formatting, and signal parsing. LLM strategies subclass this and implement `build_prompt()`.
 - `strategies/llm_client.py` — `AzureOpenAIClient` wrapper. Reads env vars, calls Azure OpenAI REST API, retry with backoff on HTTP errors and network failures.
 - `server/registry.py` — `@register("name")` decorator for strategy discovery
