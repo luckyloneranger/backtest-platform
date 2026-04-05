@@ -34,11 +34,11 @@ class VwapReversion(Strategy):
         return [{"interval": "5minute", "lookback": 100}]
 
     def initialize(self, config, instruments):
-        self.std_mult = config.get("std_mult", 1.0)
-        self.risk_pct = config.get("risk_pct", 0.02)
+        self.std_mult = config.get("std_mult", 2.5)
+        self.risk_pct = config.get("risk_pct", 0.05)
         self.warmup_bars = config.get("warmup_bars", 6)
         self.exit_time_hour = config.get("exit_time_hour", 15)
-        self.max_trades_per_day = config.get("max_trades_per_day", 3)
+        self.max_trades_per_day = config.get("max_trades_per_day", 1)
         self.instruments = instruments
 
         self.pm = PositionManager(max_pending_bars=2)

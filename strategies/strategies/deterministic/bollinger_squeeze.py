@@ -38,9 +38,9 @@ class BollingerSqueeze(Strategy):
     def initialize(self, config, instruments):
         self.bb_period = config.get("bb_period", 20)
         self.bb_std = config.get("bb_std", 2.0)
-        self.squeeze_threshold = config.get("squeeze_threshold", 0.5)
+        self.squeeze_threshold = config.get("squeeze_threshold", 0.7)
         self.volume_confirm = config.get("volume_confirm", 1.5)
-        self.risk_per_trade = config.get("risk_per_trade", 0.015)
+        self.risk_per_trade = config.get("risk_per_trade", 0.005)
         self.atr_period = config.get("atr_period", 14)
         self.profit_target_atr = config.get("profit_target_atr", 1.5)
         self.atr_stop_mult = config.get("atr_stop_mult", 1.0)
