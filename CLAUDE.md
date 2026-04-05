@@ -68,6 +68,8 @@ Dependency flow: `cli → data → core → proto`
 - `server/registry.py` — `@register("name")` decorator for strategy discovery
 - `server/server.py` — gRPC server: handles `GetRequirements`, `Initialize`, `OnBar`, `OnComplete`
 - Deterministic strategies go in `strategies/strategies/deterministic/`, LLM strategies in `strategies/strategies/llm/`, all decorated with `@register`
+- **6 deterministic strategies**: `sma_crossover`, `rsi_daily_trend`, `donchian_breakout` (original), `confluence`, `pairs_trading`, `regime_adaptive` (new, pandas-ta powered). 1 LLM: `llm_signal_generator`.
+- **Strategy tuning insights**: Mean-reversion strategies (RSI) need large positions (`risk_pct=0.3`) and long cooldowns to avoid overtrading. Trend-following strategies (Donchian) benefit from ADX trend filter (`min_adx=20`) to avoid choppy markets. Reducing risk_pct from 0.3→0.2 destroyed RSI's edge by generating 4x more trades.
 
 ### Strategy Data Flow
 

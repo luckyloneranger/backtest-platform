@@ -213,12 +213,12 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 | Strategy | Type | Timeframes | Description |
 |----------|------|-----------|-------------|
-| `sma_crossover` | Deterministic | day | SMA crossover with ATR sizing, trailing stops, pyramiding, long+short |
-| `rsi_daily_trend` | Deterministic | 15min + day | RSI mean reversion with pyramid entries (RSI 35/25/15), partial exits, ATR stops, long+short |
-| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with risk-based sizing, partial profits, trailing stops, long+short |
-| `confluence` | Deterministic | day | Multi-indicator confluence (RSI+MACD+Bollinger+ADX+OBV) — trades only when 3+ indicators agree |
+| `sma_crossover` | Deterministic | day | SMA crossover (5/20) with ATR sizing, trailing stops, pyramiding, long+short |
+| `rsi_daily_trend` | Deterministic | 15min + day | RSI mean reversion with pyramid entries (RSI 35/25/15), partial exits, ATR stops, cooldown, long+short |
+| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with ADX trend filter, risk-based sizing, trailing stops, long+short |
+| `confluence` | Deterministic | day | Multi-indicator confluence (RSI+MACD+Bollinger+ADX+OBV) — trades when 2+ indicators agree |
 | `pairs_trading` | Deterministic | day | Statistical pairs trading via cointegration — market-neutral, trades spread z-score |
-| `regime_adaptive` | Deterministic | 15min + day | Regime detection (trending/ranging/volatile) — switches sub-strategies based on ADX+BBW |
+| `regime_adaptive` | Deterministic | 15min + day | Regime detection (trending/ranging/volatile) with smoothing — switches sub-strategies based on ADX+BBW |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
 
 ## Strategy Interface
