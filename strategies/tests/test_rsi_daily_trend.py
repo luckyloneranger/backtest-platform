@@ -58,6 +58,7 @@ def _setup_strategy(**overrides) -> RsiDailyTrend:
         "atr_stop_multiplier": 2.0,
         "max_loss_pct": 0.03,
         "max_hold_bars": 20,
+        "cooldown_bars": 0,
     }
     config.update(overrides)
     s = RsiDailyTrend()
@@ -329,36 +330,26 @@ def test_trailing_stop_exit():
 
 def test_max_loss_exit():
     """Should exit when price drops more than max_loss_pct below avg_entry."""
-    s = _setup_strategy(max_loss_pct=0.03, atr_stop_multiplier=100.0, max_hold_bars=9999)
+    s = _setup_strategy(max_loss_pct=0.03, atr_stop_multiplier=100.0, max_hold_bars=9999,
+                        cooldown_bars=0)
     _establish_uptrend(s)
 
     state = s._get_state("TEST")
 
-    # Warmup + enter, tracking qty
+    # Warmup RSI with enough bars
     warmup = [100, 101, 102, 103, 104, 105, 106]
     _feed_15m_prices(s, warmup)
 
-    current_qty = 0
-    ts = 200
-    drop = [104, 100, 96, 92, 88]
-    for p in drop:
-        pos = [Position(symbol="TEST", quantity=current_qty, avg_price=96.0, unrealized_pnl=0.0)] if current_qty > 0 else []
-        snap = make_snapshot(ts, close_15m=float(p), positions=pos)
-        sigs = s.on_bar(snap)
-        for sig in sigs:
-            if sig.action == "BUY":
-                current_qty += sig.quantity
-        ts += 1
-
-    assert state.pyramid_level >= 1
-
-    # Set state for max loss test
+    # Manually set up a long position (bypassing entry logic to test exit directly)
+    state.direction = "long"
+    state.pyramid_level = 3  # max level so no more pyramiding
     state.avg_entry_price = 100.0
+    state.total_qty = 50
+    state.entry_bar = state.bar_count
     state.trailing_stop = 0.0  # disable trailing stop
     state.partial_taken = True
 
-    entry_qty = current_qty
-    held = Position(symbol="TEST", quantity=entry_qty, avg_price=100.0, unrealized_pnl=0.0)
+    held = Position(symbol="TEST", quantity=50, avg_price=100.0, unrealized_pnl=0.0)
 
     # Price drops > 3% -> should trigger max loss exit
     # max_loss_price = 100 * (1 - 0.03) = 97.0

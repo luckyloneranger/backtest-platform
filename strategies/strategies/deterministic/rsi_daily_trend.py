@@ -37,10 +37,10 @@ Target position = risk_pct * portfolio.cash / price
 
 Config defaults:
 - rsi_period=14, ema_period=20
-- rsi_entry_1=40, rsi_entry_2=30, rsi_entry_3=20
+- rsi_entry_1=35, rsi_entry_2=25, rsi_entry_3=15
 - rsi_partial_exit=60, rsi_full_exit=70
-- risk_pct=0.3, atr_period=14, atr_stop_multiplier=2.0
-- max_loss_pct=0.03, max_hold_bars=20
+- risk_pct=0.3, max_pyramid_levels=2, atr_period=14, atr_stop_multiplier=2.0
+- max_loss_pct=0.03, max_hold_bars=40, cooldown_bars=50
 
 Short side thresholds are mirrored: 100 - rsi_entry_X and 100 - rsi_exit_X.
 """
@@ -63,6 +63,7 @@ class SymbolState:
     entry_bar: int = 0
     partial_taken: bool = False
     trailing_stop: float = 0.0
+    last_exit_bar: int = 0  # cooldown: bar when last position was closed
     prices_15m: deque = field(default_factory=lambda: deque(maxlen=110))
     prices_daily: deque = field(default_factory=lambda: deque(maxlen=60))
     daily_highs: deque = field(default_factory=lambda: deque(maxlen=60))
@@ -93,9 +94,9 @@ class RsiDailyTrend(Strategy):
     def initialize(self, config: dict, instruments: dict[str, InstrumentInfo]) -> None:
         # RSI parameters (long side; short side mirrors via 100 - X)
         self.rsi_period = config.get("rsi_period", 14)
-        self.rsi_entry_1 = config.get("rsi_entry_1", 40)
-        self.rsi_entry_2 = config.get("rsi_entry_2", 30)
-        self.rsi_entry_3 = config.get("rsi_entry_3", 20)
+        self.rsi_entry_1 = config.get("rsi_entry_1", 35)
+        self.rsi_entry_2 = config.get("rsi_entry_2", 25)
+        self.rsi_entry_3 = config.get("rsi_entry_3", 15)
         self.rsi_partial_exit = config.get("rsi_partial_exit", 60)
         self.rsi_full_exit = config.get("rsi_full_exit", 70)
 
@@ -104,12 +105,16 @@ class RsiDailyTrend(Strategy):
 
         # Position sizing
         self.risk_pct = config.get("risk_pct", 0.3)
+        self.max_pyramid_levels = config.get("max_pyramid_levels", 2)
 
         # Stop parameters
         self.atr_period = config.get("atr_period", 14)
         self.atr_stop_multiplier = config.get("atr_stop_multiplier", 2.0)
         self.max_loss_pct = config.get("max_loss_pct", 0.03)
-        self.max_hold_bars = config.get("max_hold_bars", 20)
+        self.max_hold_bars = config.get("max_hold_bars", 40)
+
+        # Cooldown: don't re-enter same symbol for N bars after exit
+        self.cooldown_bars = config.get("cooldown_bars", 50)
 
         self.instruments = instruments
 
@@ -195,6 +200,7 @@ class RsiDailyTrend(Strategy):
 
     def _reset_state(self, state: SymbolState) -> None:
         """Reset position-related state after full exit."""
+        state.last_exit_bar = state.bar_count  # cooldown starts now
         state.direction = "flat"
         state.pyramid_level = 0
         state.avg_entry_price = 0.0
@@ -209,6 +215,11 @@ class RsiDailyTrend(Strategy):
         level_qty: int, signals: list[Signal],
     ) -> None:
         """Handle long pyramid entries (levels 1-3)."""
+        # Cooldown check: don't re-enter too soon after exiting
+        if state.direction == "flat" and state.last_exit_bar > 0:
+            if state.bar_count - state.last_exit_bar < self.cooldown_bars:
+                return
+
         if state.direction == "flat" and rsi < self.rsi_entry_1 and trend_up and level_qty > 0:
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
@@ -223,7 +234,7 @@ class RsiDailyTrend(Strategy):
             if atr is not None:
                 state.trailing_stop = bar_close - self.atr_stop_multiplier * atr
 
-        elif state.direction == "long" and state.pyramid_level == 1 and rsi < self.rsi_entry_2 and level_qty > 0:
+        elif state.direction == "long" and state.pyramid_level == 1 and self.max_pyramid_levels >= 2 and rsi < self.rsi_entry_2 and level_qty > 0:
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
                 product_type="MIS",
@@ -234,7 +245,7 @@ class RsiDailyTrend(Strategy):
             state.avg_entry_price = (old_cost + new_cost) / state.total_qty
             state.pyramid_level = 2
 
-        elif state.direction == "long" and state.pyramid_level == 2 and rsi < self.rsi_entry_3 and level_qty > 0:
+        elif state.direction == "long" and state.pyramid_level == 2 and self.max_pyramid_levels >= 3 and rsi < self.rsi_entry_3 and level_qty > 0:
             signals.append(Signal(
                 action="BUY", symbol=symbol, quantity=level_qty,
                 product_type="MIS",
@@ -325,7 +336,12 @@ class RsiDailyTrend(Strategy):
         """
         short_entry_1 = 100 - self.rsi_entry_1  # default 60
         short_entry_2 = 100 - self.rsi_entry_2  # default 70
-        short_entry_3 = 100 - self.rsi_entry_3  # default 80
+        short_entry_3 = 100 - self.rsi_entry_3  # default 85
+
+        # Cooldown check
+        if state.direction == "flat" and state.last_exit_bar > 0:
+            if state.bar_count - state.last_exit_bar < self.cooldown_bars:
+                return
 
         if state.direction == "flat" and rsi > short_entry_1 and trend_down and level_qty > 0:
             signals.append(Signal(
@@ -342,7 +358,7 @@ class RsiDailyTrend(Strategy):
             if atr is not None:
                 state.trailing_stop = bar_close + self.atr_stop_multiplier * atr
 
-        elif state.direction == "short" and state.pyramid_level == 1 and rsi > short_entry_2 and level_qty > 0:
+        elif state.direction == "short" and state.pyramid_level == 1 and self.max_pyramid_levels >= 2 and rsi > short_entry_2 and level_qty > 0:
             signals.append(Signal(
                 action="SELL", symbol=symbol, quantity=level_qty,
                 product_type="MIS",
@@ -353,7 +369,7 @@ class RsiDailyTrend(Strategy):
             state.avg_entry_price = (old_cost + new_cost) / state.total_qty
             state.pyramid_level = 2
 
-        elif state.direction == "short" and state.pyramid_level == 2 and rsi > short_entry_3 and level_qty > 0:
+        elif state.direction == "short" and state.pyramid_level == 2 and self.max_pyramid_levels >= 3 and rsi > short_entry_3 and level_qty > 0:
             signals.append(Signal(
                 action="SELL", symbol=symbol, quantity=level_qty,
                 product_type="MIS",
