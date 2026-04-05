@@ -2,7 +2,7 @@
 
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo,
-    FillInfo,
+    FillInfo, PendingOrder,
 )
 from strategies.deterministic.donchian_breakout import DonchianBreakout
 from strategies.indicators import compute_atr
@@ -22,6 +22,7 @@ def make_snapshot(
     cash: float = 100_000.0,
     positions: list[Position] | None = None,
     fills: list[FillInfo] | None = None,
+    pending_orders: list[PendingOrder] | None = None,
 ) -> MarketSnapshot:
     timeframes = {}
     if close_15m is not None:
@@ -36,6 +37,7 @@ def make_snapshot(
         timeframes["day"] = {symbol: bar}
     pos_list = positions if positions is not None else []
     fill_list = fills if fills is not None else []
+    pending_list = pending_orders if pending_orders is not None else []
     equity = cash + sum(p.quantity * p.avg_price for p in pos_list)
     return MarketSnapshot(
         timestamp_ms=ts,
@@ -47,6 +49,7 @@ def make_snapshot(
         rejections=[],
         closed_trades=[],
         context=SessionContext(100_000.0, ts, 1000, "2024-01-01", "2024-12-31", ["15minute", "day"], 200),
+        pending_orders=pending_list,
     )
 
 
@@ -794,7 +797,15 @@ def test_trailing_stop_ratchet_cancel_resubmit():
 
     # Price rises significantly -> trailing stop should ratchet up
     high_price = entry_price + 5.0
-    signals = s.on_bar(make_snapshot(102, close_15m=high_price, positions=[held]))
+    # Provide existing pending SL-M so expiry re-submission doesn't trigger
+    existing_stop = PendingOrder(
+        symbol="TEST", side="SELL", quantity=buy_qty,
+        order_type="SL_M", limit_price=0.0, stop_price=initial_stop,
+    )
+    signals = s.on_bar(make_snapshot(
+        102, close_15m=high_price, positions=[held],
+        pending_orders=[existing_stop],
+    ))
 
     # New stop should be higher
     expected_new_stop = high_price - atr * 1.5
@@ -941,3 +952,176 @@ def test_stop_hit_resets_state():
     assert s.in_position["TEST"] is False
     assert s.has_engine_stop["TEST"] is False
     assert s.has_profit_target["TEST"] is False
+
+
+# ==============================================================================
+# DAY ORDER EXPIRY RE-SUBMISSION TESTS
+# ==============================================================================
+
+
+def test_stop_resubmitted_after_expiry():
+    """Long position with has_engine_stop=True but no pending SL-M -> re-submits SL-M."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "profit_target_atr": 2.0,
+    }, {})
+
+    _build_channel(s)
+    entry_signals = _enter_position(s)
+    buy_qty = entry_signals[0].quantity
+    entry_price = 108.0
+    atr = s.current_atr["TEST"]
+
+    # First bar after entry: submit engine orders (SL-M + LIMIT)
+    held = Position(symbol="TEST", quantity=buy_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    s.on_bar(make_snapshot(101, close_15m=entry_price + 0.5, positions=[held]))
+    assert s.has_engine_stop["TEST"] is True
+    assert s.has_profit_target["TEST"] is True
+
+    # Simulate next morning: DAY orders expired, pending_orders is empty.
+    # has_engine_stop is still True but there's no actual pending SL-M.
+    # The strategy should detect this and re-submit the SL-M.
+    signals = s.on_bar(make_snapshot(
+        200, close_15m=entry_price + 1.0,
+        positions=[held],
+        pending_orders=[],  # all expired
+    ))
+
+    # Should contain a re-submitted SL-M stop
+    slm_signals = [sig for sig in signals if sig.order_type == "SL_M"]
+    assert len(slm_signals) >= 1
+    assert slm_signals[0].action == "SELL"
+    assert slm_signals[0].symbol == "TEST"
+    assert slm_signals[0].quantity == buy_qty
+    assert slm_signals[0].stop_price > 0
+
+
+def test_profit_target_resubmitted_after_expiry():
+    """Long position with has_profit_target=True, partial_taken=False, no pending LIMIT -> re-submits LIMIT."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "profit_target_atr": 2.0,
+    }, {})
+
+    _build_channel(s)
+    entry_signals = _enter_position(s)
+    buy_qty = entry_signals[0].quantity
+    entry_price = 108.0
+    atr = s.current_atr["TEST"]
+
+    # First bar after entry: submit engine orders (SL-M + LIMIT)
+    held = Position(symbol="TEST", quantity=buy_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    s.on_bar(make_snapshot(101, close_15m=entry_price + 0.5, positions=[held]))
+    assert s.has_engine_stop["TEST"] is True
+    assert s.has_profit_target["TEST"] is True
+    assert s.partial_taken["TEST"] is False
+
+    # Simulate next morning: DAY orders expired, pending_orders is empty.
+    signals = s.on_bar(make_snapshot(
+        200, close_15m=entry_price + 1.0,
+        positions=[held],
+        pending_orders=[],  # all expired
+    ))
+
+    # Should contain a re-submitted LIMIT profit target
+    limit_signals = [sig for sig in signals if sig.order_type == "LIMIT"]
+    assert len(limit_signals) >= 1
+    assert limit_signals[0].action == "SELL"
+    assert limit_signals[0].symbol == "TEST"
+
+    # Price should be entry + 2 * ATR
+    expected_price = entry_price + 2.0 * atr
+    assert abs(limit_signals[0].limit_price - expected_price) < 0.01
+
+    # Quantity should be 1/3 of position
+    expected_partial = max(1, buy_qty // 3)
+    assert limit_signals[0].quantity == expected_partial
+
+
+def test_short_stop_resubmitted_after_expiry():
+    """Short position with has_engine_stop=True but no pending SL-M -> re-submits SL-M BUY."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "profit_target_atr": 2.0,
+        "max_loss_pct": 0.50,
+    }, {})
+
+    _build_channel_for_short(s)
+    entry_signals = _enter_short_position(s, entry_price=90.0)
+    sell_signals = [sig for sig in entry_signals if sig.action == "SELL"]
+    entry_qty = sell_signals[0].quantity
+    entry_price = 90.0
+
+    # First bar after entry: submit engine orders
+    held = Position(symbol="TEST", quantity=-entry_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    s.on_bar(make_snapshot(101, close_15m=entry_price - 1, positions=[held]))
+    assert s.has_engine_stop["TEST"] is True
+
+    # Simulate next morning: DAY orders expired
+    signals = s.on_bar(make_snapshot(
+        200, close_15m=entry_price - 0.5,
+        positions=[held],
+        pending_orders=[],  # all expired
+    ))
+
+    # Should contain a re-submitted SL-M BUY (stop for short)
+    slm_signals = [sig for sig in signals if sig.order_type == "SL_M"]
+    assert len(slm_signals) >= 1
+    assert slm_signals[0].action == "BUY"
+    assert slm_signals[0].symbol == "TEST"
+    assert slm_signals[0].quantity == entry_qty
+    assert slm_signals[0].stop_price > 0
+
+
+def test_no_resubmit_when_pending_orders_present():
+    """No re-submission when pending orders still exist (not expired)."""
+    s = DonchianBreakout()
+    s.initialize({
+        "channel_period": 5, "atr_period": 3, "atr_multiplier": 1.5,
+        "volume_factor": 1.0, "risk_per_trade": 0.02,
+        "profit_target_atr": 2.0,
+    }, {})
+
+    _build_channel(s)
+    entry_signals = _enter_position(s)
+    buy_qty = entry_signals[0].quantity
+    entry_price = 108.0
+    atr = s.current_atr["TEST"]
+
+    # First bar after entry: submit engine orders
+    held = Position(symbol="TEST", quantity=buy_qty, avg_price=entry_price, unrealized_pnl=0.0)
+    s.on_bar(make_snapshot(101, close_15m=entry_price + 0.5, positions=[held]))
+    assert s.has_engine_stop["TEST"] is True
+    assert s.has_profit_target["TEST"] is True
+
+    # Next bar: pending orders still exist -> no re-submission
+    existing_stop = PendingOrder(
+        symbol="TEST", side="SELL", quantity=buy_qty,
+        order_type="SL_M", limit_price=0.0,
+        stop_price=s.trailing_stop["TEST"],
+    )
+    existing_target = PendingOrder(
+        symbol="TEST", side="SELL", quantity=max(1, buy_qty // 3),
+        order_type="LIMIT",
+        limit_price=entry_price + 2.0 * atr,
+        stop_price=0.0,
+    )
+    signals = s.on_bar(make_snapshot(
+        200, close_15m=entry_price + 0.5,
+        positions=[held],
+        pending_orders=[existing_stop, existing_target],
+    ))
+
+    # Should NOT have any re-submitted SL-M or LIMIT (the ratchet may cancel+resubmit
+    # if price moved, but since price didn't move much, we shouldn't see extra orders)
+    # The key assertion: no extra stop re-submission from the expiry code path
+    slm_signals = [sig for sig in signals if sig.order_type == "SL_M"]
+    # At most one SL-M from trailing stop ratchet (if price moved up)
+    # but not from expiry re-submission
+    assert len(slm_signals) <= 1

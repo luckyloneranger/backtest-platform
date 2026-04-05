@@ -282,6 +282,38 @@ class DonchianBreakout(Strategy):
                 if bar.close > self.highest_since_entry[symbol]:
                     self.highest_since_entry[symbol] = bar.close
 
+                # --- Re-submit expired engine orders (DAY order expiry at 15:30 IST) ---
+                if held_qty > 0:
+                    if self.has_engine_stop.get(symbol, False):
+                        has_stop = any(
+                            po.symbol == symbol and po.order_type == "SL_M"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_stop and self.trailing_stop.get(symbol, 0) > 0:
+                            signals.append(Signal(
+                                action="SELL", symbol=symbol,
+                                quantity=held_qty,
+                                order_type="SL_M",
+                                stop_price=self.trailing_stop[symbol],
+                                product_type=product,
+                            ))
+
+                    if self.has_profit_target.get(symbol, False) and not self.partial_taken.get(symbol, False):
+                        has_target = any(
+                            po.symbol == symbol and po.order_type == "LIMIT"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_target:
+                            atr_val = self.current_atr.get(symbol, 0)
+                            if atr_val > 0:
+                                partial_qty = max(1, held_qty // 3)
+                                target_price = avg_entry + self.profit_target_atr * atr_val
+                                signals.append(Signal(
+                                    action="SELL", symbol=symbol, quantity=partial_qty,
+                                    order_type="LIMIT", limit_price=target_price,
+                                    product_type=product,
+                                ))
+
                 # --- Trailing stop ratchet (cancel + resubmit) ---
                 if atr > 0:
                     new_stop = self.highest_since_entry[symbol] - (atr * self.atr_multiplier)
@@ -395,6 +427,38 @@ class DonchianBreakout(Strategy):
                 # --- Update lowest since entry (tracks in favour of short) ---
                 if bar.close < self.lowest_since_entry[symbol]:
                     self.lowest_since_entry[symbol] = bar.close
+
+                # --- Re-submit expired engine orders (DAY order expiry at 15:30 IST) ---
+                if abs_held > 0:
+                    if self.has_engine_stop.get(symbol, False):
+                        has_stop = any(
+                            po.symbol == symbol and po.order_type == "SL_M"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_stop and self.trailing_stop.get(symbol, 0) > 0:
+                            signals.append(Signal(
+                                action="BUY", symbol=symbol,
+                                quantity=abs_held,
+                                order_type="SL_M",
+                                stop_price=self.trailing_stop[symbol],
+                                product_type=product,
+                            ))
+
+                    if self.has_profit_target.get(symbol, False) and not self.partial_taken.get(symbol, False):
+                        has_target = any(
+                            po.symbol == symbol and po.order_type == "LIMIT"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_target:
+                            atr_val = self.current_atr.get(symbol, 0)
+                            if atr_val > 0:
+                                partial_qty = max(1, abs_held // 3)
+                                target_price = avg_entry - self.profit_target_atr * atr_val
+                                signals.append(Signal(
+                                    action="BUY", symbol=symbol, quantity=partial_qty,
+                                    order_type="LIMIT", limit_price=target_price,
+                                    product_type=product,
+                                ))
 
                 # --- Trailing stop ratchet (cancel + resubmit, only moves DOWN for shorts) ---
                 if atr > 0:
