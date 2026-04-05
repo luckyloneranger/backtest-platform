@@ -27,6 +27,7 @@ class SymbolState:
     pending_entry: bool = False       # limit entry order outstanding
     pending_side: str = ""            # "BUY" or "SELL" — direction of pending entry
     pending_qty: int = 0              # quantity of pending entry order
+    pending_since_bar: int = 0       # bar_count when pending_entry was set
     has_engine_stop: bool = False     # SL-M stop in engine
     product_type: str = "CNC"        # "CNC" or "MIS" — set at entry time
 
@@ -130,6 +131,7 @@ class SmaCrossover(Strategy):
         state.pending_entry = False
         state.pending_side = ""
         state.pending_qty = 0
+        state.pending_since_bar = 0
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:
         signals: list[Signal] = []
@@ -168,6 +170,22 @@ class SmaCrossover(Strategy):
                 self._reconcile_position(state, snapshot.portfolio.positions, symbol)
 
                 # 5. Handle pending entry orders
+                # Check if pending limit entry expired (DAY order expiry at 15:30 IST)
+                # Skip on the first bar after submission (engine hasn't processed it yet)
+                if state.pending_entry and self.bar_count > state.pending_since_bar:
+                    has_pending_limit = any(
+                        po.symbol == symbol and po.order_type == "LIMIT"
+                        for po in snapshot.pending_orders
+                    )
+                    if not has_pending_limit and not any(
+                        f.symbol == symbol for f in snapshot.fills
+                    ):
+                        # Limit entry expired without filling — reset pending state
+                        state.pending_entry = False
+                        state.pending_side = ""
+                        state.pending_qty = 0
+                        state.pending_since_bar = 0
+
                 if state.pending_entry:
                     self._handle_pending_entry(
                         state, symbol, bar, snapshot, signals,
@@ -202,6 +220,7 @@ class SmaCrossover(Strategy):
                                 state.pending_entry = True
                                 state.pending_side = "BUY"
                                 state.pending_qty = qty
+                                state.pending_since_bar = self.bar_count
                                 state.product_type = product
 
                     elif (
@@ -229,6 +248,7 @@ class SmaCrossover(Strategy):
                                 state.pending_entry = True
                                 state.pending_side = "SELL"
                                 state.pending_qty = qty
+                                state.pending_since_bar = self.bar_count
                                 state.product_type = product
 
                 # 7. If LONG: check stop hit, exits, then pyramiding
@@ -243,6 +263,26 @@ class SmaCrossover(Strategy):
                             self._reset_state(state)
                             state.prev_fast_above = fast_above
                             continue
+
+                    # Re-submit expired engine stop (DAY order expiry at 15:30 IST)
+                    if state.has_engine_stop and state.position_qty != 0:
+                        has_stop_in_engine = any(
+                            po.symbol == symbol and po.order_type == "SL_M"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_stop_in_engine:
+                            # Stop expired — re-submit at current trailing stop level
+                            if state.trailing_stop > 0:
+                                signals.append(
+                                    Signal(
+                                        action="SELL",
+                                        symbol=symbol,
+                                        quantity=abs(state.position_qty),
+                                        order_type="SL_M",
+                                        stop_price=state.trailing_stop,
+                                        product_type=state.product_type,
+                                    )
+                                )
 
                     state.bars_in_position += 1
 
@@ -337,6 +377,27 @@ class SmaCrossover(Strategy):
                             self._reset_state(state)
                             state.prev_fast_above = fast_above
                             continue
+
+                    # Re-submit expired engine stop (DAY order expiry at 15:30 IST)
+                    if state.has_engine_stop and state.position_qty != 0:
+                        has_stop_in_engine = any(
+                            po.symbol == symbol and po.order_type == "SL_M"
+                            for po in snapshot.pending_orders
+                        )
+                        if not has_stop_in_engine:
+                            # Stop expired — re-submit at current trailing stop level
+                            if state.trailing_stop > 0:
+                                side = "BUY"  # cover short
+                                signals.append(
+                                    Signal(
+                                        action=side,
+                                        symbol=symbol,
+                                        quantity=abs(state.position_qty),
+                                        order_type="SL_M",
+                                        stop_price=state.trailing_stop,
+                                        product_type=state.product_type,
+                                    )
+                                )
 
                     state.bars_in_position += 1
                     abs_qty = abs(state.position_qty)
@@ -492,6 +553,7 @@ class SmaCrossover(Strategy):
                         product_type=state.product_type,
                     )
                 )
+                state.pending_since_bar = self.bar_count
 
         elif state.pending_side == "SELL":
             # Check if short entry filled
@@ -547,3 +609,4 @@ class SmaCrossover(Strategy):
                         product_type=state.product_type,
                     )
                 )
+                state.pending_since_bar = self.bar_count

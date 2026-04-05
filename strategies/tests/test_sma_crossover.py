@@ -596,10 +596,19 @@ class TestLimitEntryOnGoldenCross:
         # Sharp upswing to trigger golden cross
         base = 100.0 - (warmup_bars - 1) * 2
         entry_signals = []
+        pending_limit = None  # track pending LIMIT for pending_orders
         for i in range(4):
             price = base + (i + 1) * 15
-            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5)
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
             sigs = s.on_bar(snap)
+            for sig in sigs:
+                if sig.action == "BUY" and sig.order_type == "LIMIT":
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
             entry_signals.extend(sigs)
 
         limit_buys = [sig for sig in entry_signals if sig.action == "BUY" and sig.order_type == "LIMIT"]
@@ -632,10 +641,19 @@ class TestCancelUnfilledLimitOnReversal:
 
         # Sharp upswing to trigger golden cross
         base = 100.0 - (warmup_bars - 1) * 2
+        pending_limit = None
         for i in range(4):
             price = base + (i + 1) * 15
-            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5)
-            s.on_bar(snap)
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
+            sigs = s.on_bar(snap)
+            for sig in sigs:
+                if sig.action == "BUY" and sig.order_type == "LIMIT":
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
 
         state = s.states["TEST"]
         assert state.pending_entry, "Should be pending entry after golden cross"
@@ -646,11 +664,20 @@ class TestCancelUnfilledLimitOnReversal:
             price = 30.0 - i * 10  # sharp decline
             if price < 10:
                 price = 10.0
-            snap = make_snapshot(warmup_bars + 4 + i, price, high=price + 5, low=price - 5)
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + 4 + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
             sigs = s.on_bar(snap)
             reversal_signals.extend(sigs)
             if not state.pending_entry:
                 break
+            # Update pending_limit after resubmit
+            for sig in sigs:
+                if sig.action == "BUY" and sig.order_type == "LIMIT":
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
 
         cancel_sigs = [sig for sig in reversal_signals if sig.action == "CANCEL"]
         assert len(cancel_sigs) > 0, "Expected CANCEL when crossover reverses before fill"
@@ -680,14 +707,21 @@ class TestEngineStopSubmittedOnFill:
         base = 100.0 - (warmup_bars - 1) * 2
         limit_price = 0.0
         limit_qty = 0
+        pending_limit = None
         for i in range(4):
             price = base + (i + 1) * 15
-            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5)
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
             sigs = s.on_bar(snap)
             for sig in sigs:
                 if sig.action == "BUY" and sig.order_type == "LIMIT":
                     limit_price = sig.limit_price
                     limit_qty = sig.quantity
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
 
         state = s.states["TEST"]
         assert state.pending_entry, "Should be pending"
@@ -727,11 +761,14 @@ class TestTrailingStopRatchetCancelResubmit:
 
         initial_stop = state.trailing_stop
 
-        # Feed a rising bar that raises the stop
+        # Feed a rising bar that raises the stop — include existing SL-M in pending_orders
         new_high = state.highest_since_entry + 50
         snap = make_snapshot(
             300, new_high, "TEST", high=new_high + 5, low=new_high - 5,
             positions=[Position("TEST", total_qty, avg, 0.0)],
+            pending_orders=[
+                PendingOrder("TEST", "SELL", total_qty, "SL_M", 0.0, state.trailing_stop)
+            ],
         )
         sigs = s.on_bar(snap)
 
@@ -851,6 +888,218 @@ class TestDeathCrossCancelsPending:
 
         assert found_exit, "Expected death cross exit"
         assert not state.has_engine_stop, "Engine stop flag should be cleared after exit"
+
+
+class TestStopResubmittedAfterExpiry:
+    def test_stop_resubmitted_after_expiry_long(self):
+        """When has_engine_stop=True but no SL-M in pending_orders, stop should be re-submitted (long)."""
+        s = SmaCrossover()
+        all_signals, entry_price = _warmup_and_enter(s)
+
+        state = s.states["TEST"]
+        total_qty = state.position_qty
+        avg = state.avg_entry
+        assert total_qty > 0, "Should be long"
+        assert state.has_engine_stop, "Should have engine stop"
+        assert state.trailing_stop > 0, "Trailing stop should be set"
+        saved_stop = state.trailing_stop
+
+        # Feed a bar with position intact but NO pending SL-M order (stop expired at 15:30)
+        price = state.highest_since_entry  # flat price to avoid triggering trailing ratchet
+        snap = make_snapshot(
+            500, price, "TEST", high=price + 1, low=price - 1,
+            positions=[Position("TEST", total_qty, avg, 0.0)],
+            pending_orders=[],  # empty — stop expired
+        )
+        sigs = s.on_bar(snap)
+
+        # Should re-submit SL-M at the current trailing stop level
+        slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"]
+        assert len(slm_sigs) >= 1, "Expected SL-M re-submission after stop expiry"
+        assert slm_sigs[0].action == "SELL", "Long stop should be SELL"
+        assert slm_sigs[0].stop_price == saved_stop, (
+            f"Re-submitted stop should use trailing_stop={saved_stop}, got {slm_sigs[0].stop_price}"
+        )
+        assert slm_sigs[0].quantity == total_qty, "Stop qty should match position qty"
+        assert state.has_engine_stop, "has_engine_stop should remain True"
+
+    def test_stop_resubmitted_after_expiry_short(self):
+        """When has_engine_stop=True but no SL-M in pending_orders, stop should be re-submitted (short)."""
+        s = SmaCrossover()
+        all_signals, entry_price = _warmup_and_enter_short(s)
+
+        state = s.states["TEST"]
+        assert state.position_qty < 0, "Should be short"
+        abs_qty = abs(state.position_qty)
+        avg = state.avg_entry
+        assert state.has_engine_stop, "Should have engine stop"
+        assert state.trailing_stop > 0, "Trailing stop should be set"
+        saved_stop = state.trailing_stop
+
+        # Feed a bar with position intact but NO pending SL-M order (stop expired at 15:30)
+        price = state.lowest_since_entry  # flat price to avoid triggering trailing ratchet
+        snap = make_snapshot(
+            500, price, "TEST", high=price + 1, low=price - 1,
+            positions=[Position("TEST", state.position_qty, avg, 0.0)],
+            pending_orders=[],  # empty — stop expired
+        )
+        sigs = s.on_bar(snap)
+
+        # Should re-submit SL-M at the current trailing stop level
+        slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"]
+        assert len(slm_sigs) >= 1, "Expected SL-M re-submission after stop expiry"
+        assert slm_sigs[0].action == "BUY", "Short stop should be BUY (to cover)"
+        assert slm_sigs[0].stop_price == saved_stop, (
+            f"Re-submitted stop should use trailing_stop={saved_stop}, got {slm_sigs[0].stop_price}"
+        )
+        assert slm_sigs[0].quantity == abs_qty, "Stop qty should match abs position qty"
+        assert state.has_engine_stop, "has_engine_stop should remain True"
+
+    def test_no_resubmit_when_stop_exists(self):
+        """When SL-M is still in pending_orders, no duplicate stop should be emitted."""
+        s = SmaCrossover()
+        all_signals, entry_price = _warmup_and_enter(s)
+
+        state = s.states["TEST"]
+        total_qty = state.position_qty
+        avg = state.avg_entry
+        assert total_qty > 0, "Should be long"
+        assert state.has_engine_stop, "Should have engine stop"
+        initial_stop = state.trailing_stop
+
+        # Feed a bar with position AND existing SL-M in pending_orders
+        # Use price well below highest_since_entry with wide spread to keep ATR stable
+        price = state.highest_since_entry - 20
+        snap = make_snapshot(
+            500, price, "TEST", high=price + 5, low=price - 5,
+            positions=[Position("TEST", total_qty, avg, 0.0)],
+            pending_orders=[
+                PendingOrder("TEST", "SELL", total_qty, "SL_M", 0.0, state.trailing_stop)
+            ],
+        )
+        sigs = s.on_bar(snap)
+
+        # Should NOT re-submit (stop is still alive in engine)
+        # Filter for SL-M signals that are NOT from the ratchet (same stop price as initial)
+        slm_sigs = [sig for sig in sigs if sig.order_type == "SL_M"
+                     and sig.stop_price == initial_stop]
+        assert len(slm_sigs) == 0, (
+            "Should not re-submit SL-M when one already exists in pending_orders"
+        )
+
+
+class TestPendingEntryResetOnExpiry:
+    def test_pending_entry_reset_on_expiry(self):
+        """When pending_entry=True but no LIMIT in pending_orders and no fill, reset pending state."""
+        s = SmaCrossover()
+        config = {
+            "fast_period": 2, "slow_period": 5, "atr_period": 3,
+            "atr_stop_multiplier": 2.0, "min_spread": 0.005,
+            "risk_per_trade": 0.02, "max_hold_bars": 50,
+            "pyramid_levels": 0, "cnc_spread_threshold": 0.01,
+        }
+        s.initialize(config, {})
+
+        # Warmup with declining prices
+        warmup_bars = 5
+        for i in range(warmup_bars):
+            price = 100.0 - i * 2
+            snap = make_snapshot(i, price, high=price + 5, low=price - 5)
+            s.on_bar(snap)
+
+        # Sharp upswing to trigger golden cross
+        base = 100.0 - (warmup_bars - 1) * 2
+        pending_limit = None
+        for i in range(4):
+            price = base + (i + 1) * 15
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
+            sigs = s.on_bar(snap)
+            for sig in sigs:
+                if sig.action == "BUY" and sig.order_type == "LIMIT":
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
+
+        state = s.states["TEST"]
+        assert state.pending_entry, "Should be pending entry after golden cross"
+        assert state.pending_side == "BUY"
+        assert state.pending_qty > 0
+
+        # Simulate next bar: limit order expired (not in pending_orders, no fill)
+        # The pending_orders list is empty AND no fills - order expired at 15:30
+        price = base + 5 * 15  # continuing upswing (fast_above still true)
+        snap = make_snapshot(
+            warmup_bars + 4, price, high=price + 5, low=price - 5,
+            pending_orders=[],  # empty — limit expired
+            fills=[],           # no fill
+        )
+        sigs = s.on_bar(snap)
+
+        # pending state should be cleared
+        assert not state.pending_entry, "pending_entry should be cleared after expiry"
+        assert state.pending_side == "", "pending_side should be cleared"
+        assert state.pending_qty == 0, "pending_qty should be cleared"
+
+    def test_pending_entry_not_reset_when_fill_arrives(self):
+        """When a fill arrives on the same bar, pending state should NOT be cleared by expiry check."""
+        s = SmaCrossover()
+        config = {
+            "fast_period": 2, "slow_period": 5, "atr_period": 3,
+            "atr_stop_multiplier": 2.0, "min_spread": 0.005,
+            "risk_per_trade": 0.02, "max_hold_bars": 50,
+            "pyramid_levels": 0, "cnc_spread_threshold": 0.01,
+        }
+        s.initialize(config, {})
+
+        # Warmup with declining prices
+        warmup_bars = 5
+        for i in range(warmup_bars):
+            price = 100.0 - i * 2
+            snap = make_snapshot(i, price, high=price + 5, low=price - 5)
+            s.on_bar(snap)
+
+        # Sharp upswing to trigger golden cross
+        base = 100.0 - (warmup_bars - 1) * 2
+        limit_price = 0.0
+        limit_qty = 0
+        pending_limit = None
+        for i in range(4):
+            price = base + (i + 1) * 15
+            po = []
+            if pending_limit is not None:
+                po = [pending_limit]
+            snap = make_snapshot(warmup_bars + i, price, high=price + 5, low=price - 5,
+                                pending_orders=po)
+            sigs = s.on_bar(snap)
+            for sig in sigs:
+                if sig.action == "BUY" and sig.order_type == "LIMIT":
+                    limit_price = sig.limit_price
+                    limit_qty = sig.quantity
+                    pending_limit = PendingOrder("TEST", "BUY", sig.quantity, "LIMIT",
+                                                 sig.limit_price, 0.0)
+
+        state = s.states["TEST"]
+        assert state.pending_entry, "Should be pending"
+        assert limit_qty > 0, "Should have limit order"
+
+        # Fill arrives but pending_orders is empty (order filled and removed)
+        fill_price = limit_price
+        next_price = limit_price + 5
+        snap = make_snapshot(
+            warmup_bars + 4, next_price, high=next_price + 5, low=next_price - 5,
+            positions=[Position("TEST", limit_qty, fill_price, 0.0)],
+            fills=[FillInfo("TEST", "BUY", limit_qty, fill_price, 0.0, warmup_bars + 4)],
+            pending_orders=[],  # Fill consumed the order
+        )
+        sigs = s.on_bar(snap)
+
+        # Should have processed the fill — NOT reset by expiry check
+        assert not state.pending_entry, "pending_entry should be cleared by fill processing"
+        assert state.position_qty == limit_qty, "Should have a position from the fill"
+        assert state.has_engine_stop, "Should have submitted an engine stop"
 
 
 class TestStopHitResetsState:
