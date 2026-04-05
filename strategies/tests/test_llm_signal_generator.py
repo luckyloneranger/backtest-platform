@@ -124,3 +124,38 @@ def test_registered_name():
         import strategies.llm.llm_signal_generator  # noqa: F401
         s = get_strategy("llm_signal_generator")
         assert isinstance(s, LLMSignalGenerator)
+
+
+def test_build_prompt_mentions_limit_and_slm():
+    """System prompt documents LIMIT and SL_M order types."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = LLMSignalGenerator()
+        s.initialize({}, {})
+        snap = make_snapshot()
+        messages = s.build_prompt(snap)
+        system = messages[0]["content"]
+        assert "LIMIT" in system
+        assert "SL_M" in system
+
+
+def test_build_prompt_mentions_cancel():
+    """System prompt documents CANCEL action."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = LLMSignalGenerator()
+        s.initialize({}, {})
+        snap = make_snapshot()
+        messages = s.build_prompt(snap)
+        system = messages[0]["content"]
+        assert "CANCEL" in system
+
+
+def test_build_prompt_mentions_mis_cnc():
+    """System prompt documents CNC and MIS product types."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = LLMSignalGenerator()
+        s.initialize({}, {})
+        snap = make_snapshot()
+        messages = s.build_prompt(snap)
+        system = messages[0]["content"]
+        assert "CNC" in system
+        assert "MIS" in system

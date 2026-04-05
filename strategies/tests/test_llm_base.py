@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from strategies.base import (
     BarData, MarketSnapshot, Portfolio, Position, SessionContext, InstrumentInfo, Signal,
+    PendingOrder,
 )
 from strategies.llm_base import LLMStrategy
 
@@ -186,3 +187,53 @@ def test_parse_signals_valid_order_and_product_types_preserved():
         assert len(signals) == 1
         assert signals[0].order_type == "LIMIT"
         assert signals[0].product_type == "MIS"
+
+
+def test_format_snapshot_includes_pending_orders():
+    """format_snapshot includes pending orders section when present."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        snap = make_snapshot()
+        snap.pending_orders = [
+            PendingOrder(
+                symbol="RELIANCE",
+                side="BUY",
+                quantity=100,
+                order_type="LIMIT",
+                limit_price=1200.50,
+                stop_price=0.0,
+            )
+        ]
+        text = s.format_snapshot(snap)
+        assert "Pending orders:" in text
+        assert "RELIANCE" in text
+        assert "LIMIT" in text
+        assert "BUY" in text
+        assert "qty=100" in text
+        assert "limit=1200.5" in text
+
+
+def test_parse_signals_limit_without_price_defaults_market():
+    """LIMIT order without limit_price falls back to MARKET."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "BUY", "symbol": "TEST", "quantity": 10, "order_type": "LIMIT"},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 1
+        assert signals[0].order_type == "MARKET"
+
+
+def test_parse_signals_slm_without_stop_skipped():
+    """SL_M order without stop_price is skipped entirely."""
+    with patch("strategies.llm_base.AzureOpenAIClient"):
+        s = MockLLMStrategy()
+        s.initialize({}, {})
+        response = json.dumps([
+            {"action": "SELL", "symbol": "TEST", "quantity": 10, "order_type": "SL_M"},
+        ])
+        signals = s.parse_signals(response)
+        assert len(signals) == 0

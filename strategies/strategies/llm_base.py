@@ -74,6 +74,13 @@ class LLMStrategy(Strategy):
                     f"C={bar.close:.2f} V={bar.volume} OI={bar.oi}"
                 )
 
+        # Pending orders
+        if snapshot.pending_orders:
+            lines.append("Pending orders:")
+            for po in snapshot.pending_orders:
+                lines.append(f"  {po.symbol}: {po.order_type} {po.side} qty={po.quantity} "
+                             f"limit={po.limit_price} stop={po.stop_price}")
+
         # Recent history (last 5 bars per symbol/interval)
         if snapshot.history:
             lines.append("Recent history:")
@@ -124,7 +131,7 @@ class LLMStrategy(Strategy):
         signals = []
         for item in data:
             action = item.get("action", "HOLD").upper()
-            if action not in ("BUY", "SELL", "HOLD"):
+            if action not in ("BUY", "SELL", "HOLD", "CANCEL"):
                 continue
             if action == "HOLD":
                 continue
@@ -136,6 +143,16 @@ class LLMStrategy(Strategy):
             product_type = item.get("product_type", "CNC").upper()
             if product_type not in VALID_PRODUCT_TYPES:
                 product_type = "CNC"
+
+            # Require limit_price for LIMIT orders
+            if order_type == "LIMIT" and float(item.get("limit_price", 0.0)) <= 0:
+                logger.warning("LIMIT order without limit_price, defaulting to MARKET")
+                order_type = "MARKET"
+
+            # Require stop_price for SL/SL_M orders
+            if order_type in ("SL", "SL_M") and float(item.get("stop_price", 0.0)) <= 0:
+                logger.warning("SL/SL_M order without stop_price, skipping signal")
+                continue
 
             signals.append(Signal(
                 action=action,

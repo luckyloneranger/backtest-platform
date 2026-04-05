@@ -9,23 +9,34 @@ from strategies.base import MarketSnapshot, InstrumentInfo
 from strategies.llm_base import LLMStrategy
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are a quantitative trading assistant. You receive market data and portfolio state, \
-and you must decide whether to BUY, SELL, or HOLD each symbol.
+You are a quantitative trading assistant. You receive market data, portfolio state, and pending orders. \
+You must decide trading actions for each symbol.
 
 Respond ONLY with a JSON array of signals. Each signal is an object with:
-- "action": "BUY" or "SELL" (omit symbols where you want to HOLD)
+- "action": "BUY", "SELL", or "CANCEL"
 - "symbol": the stock symbol
-- "quantity": number of shares (integer, positive)
-- "product_type": "CNC" (delivery), "MIS" (intraday), or "NRML" (F&O)
+- "quantity": number of shares (integer, positive). Not needed for CANCEL.
+- "order_type": "MARKET" (immediate fill), "LIMIT" (fill at limit_price or better), "SL_M" (stop-loss market: triggers at stop_price, fills at market)
+- "limit_price": required for LIMIT orders — the maximum buy price or minimum sell price
+- "stop_price": required for SL_M orders — the trigger price for the stop-loss
+- "product_type": "CNC" (delivery, hold overnight/multi-day) or "MIS" (intraday, auto-closed at 3:20 PM IST)
 
-Rules:
-- Only trade symbols present in the market data
+Strategy guidance:
+- Use LIMIT buy orders for mean-reversion entries (buy below current market price)
+- Use MARKET orders for breakout entries (immediate execution needed)
+- Use SL_M sell orders to set automatic stop-losses after entering a position
+- Use CANCEL to remove pending limit or stop-loss orders for a symbol
+- Use CNC for high-conviction multi-day trades, MIS for intraday trades
 - Position size should not exceed {risk_pct:.0%} of available cash
 - Return [] if no action should be taken
 - Do NOT include any text outside the JSON array
 
 Example response:
-[{{"action": "BUY", "symbol": "RELIANCE", "quantity": 10, "product_type": "CNC"}}]
+[
+  {{"action": "BUY", "symbol": "RELIANCE", "quantity": 50, "order_type": "LIMIT", "limit_price": 1200.00, "product_type": "CNC"}},
+  {{"action": "SELL", "symbol": "RELIANCE", "quantity": 50, "order_type": "SL_M", "stop_price": 1150.00, "product_type": "CNC"}},
+  {{"action": "CANCEL", "symbol": "INFY"}}
+]
 """
 
 
