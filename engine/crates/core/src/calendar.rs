@@ -147,6 +147,7 @@ impl TradingCalendar {
             d(2025, 6, 7),   // Eid ul-Adha (Bakri Id) (Saturday – included)
             d(2025, 8, 15),  // Independence Day
             d(2025, 8, 27),  // Janmashtami (Ashtami)
+            d(2025, 9, 5),   // Milad-un-Nabi / Prophet's Birthday
             d(2025, 10, 2),  // Mahatma Gandhi Jayanti / Dussehra
             d(2025, 10, 21), // Diwali / Laxmi Puja
             d(2025, 10, 22), // Diwali (Balipratipada)
@@ -289,6 +290,17 @@ mod tests {
         assert!(
             !cal.is_trading_day(date),
             "Diwali 2024 (Nov 1) should not be a trading day"
+        );
+    }
+
+    #[test]
+    fn test_milad_un_nabi_2025_is_holiday() {
+        let cal = TradingCalendar::nse();
+        // Sep 5 2025 is Milad-un-Nabi (Friday) — not a trading day
+        let date = NaiveDate::from_ymd_opt(2025, 9, 5).unwrap();
+        assert!(
+            !cal.is_trading_day(date),
+            "Milad-un-Nabi 2025 (Sep 5) should not be a trading day"
         );
     }
 }

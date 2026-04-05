@@ -353,8 +353,8 @@ impl MetricsReport {
             0
         };
 
-        // 4. Compute ratio metrics (use 0% risk-free rate by default)
-        let annual_rf = 0.0;
+        // 4. Compute ratio metrics (use risk-free rate from config)
+        let annual_rf = result.config.risk_free_rate;
         let sharpe_ratio = calculate_sharpe(&daily_rets, annual_rf);
         let sortino_ratio = calculate_sortino(&daily_rets, annual_rf);
         let volatility = calculate_volatility(&daily_rets);
@@ -905,6 +905,7 @@ mod tests {
                 max_position_qty: None,
                 max_exposure_pct: None,
                 reference_symbols: vec![],
+                risk_free_rate: 0.07,
             },
             custom_metrics: serde_json::json!({}),
             benchmark_return_pct: None,

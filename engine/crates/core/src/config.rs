@@ -44,6 +44,10 @@ pub struct BacktestConfig {
     /// in MarketSnapshot but signals for them are silently dropped.
     #[serde(default)]
     pub reference_symbols: Vec<String>,
+    /// Annual risk-free rate for Sharpe/Sortino calculations (e.g. 0.07 = 7%).
+    /// Default 7% — approximate Indian government bond yield.
+    #[serde(default = "default_risk_free_rate")]
+    pub risk_free_rate: f64,
 }
 
 fn default_lookback() -> usize {
@@ -52,6 +56,10 @@ fn default_lookback() -> usize {
 
 fn default_max_volume_pct() -> f64 {
     1.0
+}
+
+fn default_risk_free_rate() -> f64 {
+    0.07 // 7% Indian government bond yield
 }
 
 #[cfg(test)]
@@ -77,6 +85,7 @@ mod tests {
             max_position_qty: None,
             max_exposure_pct: None,
             reference_symbols: vec![],
+            risk_free_rate: 0.07,
         };
 
         assert_eq!(config.strategy_name, "sma_crossover");
@@ -105,6 +114,7 @@ mod tests {
             max_position_qty: None,
             max_exposure_pct: None,
             reference_symbols: vec![],
+            risk_free_rate: 0.07,
         };
 
         let json = serde_json::to_string(&config).expect("serialize");

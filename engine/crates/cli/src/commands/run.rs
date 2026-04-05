@@ -82,6 +82,10 @@ pub struct RunArgs {
     /// Comma-separated list of non-tradable reference symbols (e.g. NIFTY 50 index)
     #[arg(long, value_delimiter = ',')]
     pub reference_symbols: Vec<String>,
+
+    /// Annual risk-free rate for Sharpe/Sortino calculations (e.g. 0.07 = 7%)
+    #[arg(long, default_value = "0.07")]
+    pub risk_free_rate: f64,
 }
 
 /// Parse an interval string into the Interval enum (delegates to shared helper).
@@ -126,6 +130,7 @@ pub async fn handle(args: RunArgs) -> Result<()> {
         max_position_qty: args.max_position_qty,
         max_exposure_pct: args.max_exposure,
         reference_symbols: args.reference_symbols.clone(),
+        risk_free_rate: args.risk_free_rate,
     };
 
     // Connect to Python strategy server

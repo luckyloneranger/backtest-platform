@@ -280,6 +280,16 @@ impl OrderMatcher {
         self.pending.drain(..).collect()
     }
 
+    /// Cancel only DAY validity orders (used at 15:30 IST market close).
+    /// GTC and other validity orders remain pending.
+    pub fn cancel_day_orders(&mut self) -> Vec<Order> {
+        let (day_orders, remaining): (Vec<Order>, Vec<Order>) = self.pending
+            .drain(..)
+            .partition(|o| o.validity == OrderValidity::Day);
+        self.pending = remaining;
+        day_orders
+    }
+
     /// Read-only access to all pending orders.
     pub fn pending_orders(&self) -> &[Order] {
         &self.pending
@@ -487,7 +497,7 @@ impl OrderMatcher {
                             let price = if bar.open <= trigger {
                                 bar.open * (1.0 - self.slippage_pct)
                             } else {
-                                trigger
+                                trigger * (1.0 - self.slippage_pct)
                             };
                             if self.within_circuit_limits(&order.symbol, price) {
                                 fills.push(Fill {
@@ -573,7 +583,7 @@ impl OrderMatcher {
                             let price = if bar.open >= trigger {
                                 bar.open * (1.0 + self.slippage_pct)
                             } else {
-                                trigger
+                                trigger * (1.0 + self.slippage_pct)
                             };
                             if self.within_circuit_limits(&order.symbol, price) {
                                 fills.push(Fill {
@@ -1326,6 +1336,7 @@ mod tests {
     #[test]
     fn test_sl_backward_compat() {
         // trigger_price=0, uses stop_price as trigger (existing behavior)
+        // With 0 slippage, fill_price = trigger * (1.0 - 0.0) = trigger
         let mut matcher = OrderMatcher::new(0.0, 1.0);
         matcher.submit(Order::stop_loss_sell("TEST", 10, 100.0));
 
@@ -1335,6 +1346,40 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert!((fills[0].fill_price - 100.0).abs() < f64::EPSILON,
             "backward compat: SL should fill at stop_price=100, got {}", fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_single_price_sell_slippage_non_gap() {
+        // SL sell at 100, bar does NOT gap (open=101 above trigger), low hits trigger.
+        // Slippage should apply to trigger price: 100 * (1 - 0.001) = 99.9
+        let slippage = 0.001;
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
+        matcher.submit(Order::stop_loss_sell("TEST", 10, 100.0));
+
+        let bar = make_bar("TEST", 101.0, 102.0, 98.0, 99.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        let expected = 100.0 * (1.0 - slippage);
+        assert!((fills[0].fill_price - expected).abs() < 1e-10,
+            "SL sell non-gap should fill at trigger*(1-slippage)={}, got {}", expected, fills[0].fill_price);
+    }
+
+    #[test]
+    fn test_sl_single_price_buy_slippage_non_gap() {
+        // SL buy at 100, bar does NOT gap (open=99 below trigger), high hits trigger.
+        // Slippage should apply to trigger price: 100 * (1 + 0.001) = 100.1
+        let slippage = 0.001;
+        let mut matcher = OrderMatcher::new(slippage, 1.0);
+        matcher.submit(Order::stop_loss_buy("TEST", 10, 100.0));
+
+        let bar = make_bar("TEST", 99.0, 102.0, 98.0, 101.0, 1_000);
+        let (fills, _) = matcher.process_bar(&bar);
+
+        assert_eq!(fills.len(), 1);
+        let expected = 100.0 * (1.0 + slippage);
+        assert!((fills[0].fill_price - expected).abs() < 1e-10,
+            "SL buy non-gap should fill at trigger*(1+slippage)={}, got {}", expected, fills[0].fill_price);
     }
 
     // ── Per-order cancellation tests ──────────────────────────────────
@@ -1389,5 +1434,35 @@ mod tests {
         assert_eq!(info.order_id, 1);
         assert_eq!(info.symbol, "TEST");
         assert_eq!(info.quantity, 10);
+    }
+
+    // ── DAY expiry tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cancel_day_orders_only_cancels_day_validity() {
+        let mut matcher = OrderMatcher::new(0.0, 1.0);
+
+        // Submit a DAY order
+        let mut day_order = Order::limit_buy("TEST", 10, 100.0);
+        day_order.validity = OrderValidity::Day;
+        matcher.submit(day_order);
+
+        // Submit an IOC order (not Day)
+        let mut ioc_order = Order::limit_buy("TEST", 5, 95.0);
+        ioc_order.validity = OrderValidity::Ioc;
+        matcher.submit(ioc_order);
+
+        assert_eq!(matcher.pending_orders().len(), 2);
+
+        // Cancel only DAY orders
+        let cancelled = matcher.cancel_day_orders();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].quantity, 10);
+        assert_eq!(cancelled[0].validity, OrderValidity::Day);
+
+        // IOC order should remain
+        assert_eq!(matcher.pending_orders().len(), 1);
+        assert_eq!(matcher.pending_orders()[0].quantity, 5);
+        assert_eq!(matcher.pending_orders()[0].validity, OrderValidity::Ioc);
     }
 }

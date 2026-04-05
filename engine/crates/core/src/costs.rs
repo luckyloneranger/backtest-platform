@@ -89,8 +89,12 @@ impl ZerodhaCostModel {
         // 5. SEBI turnover fees: Rs 10 per crore = 10 / 10_000_000
         let sebi_fees = turnover * (10.0 / 10_000_000.0);
 
-        // 6. Stamp duty: 0.015% on buy side only
-        let stamp_duty = 0.00015 * params.buy_value;
+        // 6. Stamp duty: 0.015% delivery, 0.003% intraday — on buy side only
+        let stamp_duty = if params.is_intraday {
+            0.00003 * params.buy_value   // 0.003% for intraday
+        } else {
+            0.00015 * params.buy_value   // 0.015% for delivery
+        };
 
         TradeCosts {
             total_brokerage,
@@ -383,7 +387,51 @@ mod tests {
         assert!(costs.total() > 0.0, "Total costs must be > 0");
     }
 
-    // Test 10: Equity intraday also has zero brokerage
+    // Test 10: Stamp duty uses intraday rate for MIS trades
+    #[test]
+    fn test_stamp_duty_intraday_rate() {
+        let model = ZerodhaCostModel;
+        let params = TradeParams {
+            instrument_type: InstrumentType::Equity,
+            is_intraday: true,
+            buy_value: 1_000_000.0,
+            sell_value: 1_010_000.0,
+            quantity: 100,
+        };
+        let costs = model.calculate(&params);
+        // Intraday stamp duty: 0.003% of buy_value = 0.00003 * 1_000_000 = 30
+        let expected_stamp = 0.00003 * 1_000_000.0;
+        assert!(
+            approx_eq(costs.stamp_duty, expected_stamp),
+            "Expected intraday stamp duty {}, got {}",
+            expected_stamp,
+            costs.stamp_duty
+        );
+    }
+
+    // Test 11: Stamp duty uses delivery rate for CNC trades
+    #[test]
+    fn test_stamp_duty_delivery_rate() {
+        let model = ZerodhaCostModel;
+        let params = TradeParams {
+            instrument_type: InstrumentType::Equity,
+            is_intraday: false,
+            buy_value: 1_000_000.0,
+            sell_value: 1_010_000.0,
+            quantity: 100,
+        };
+        let costs = model.calculate(&params);
+        // Delivery stamp duty: 0.015% of buy_value = 0.00015 * 1_000_000 = 150
+        let expected_stamp = 0.00015 * 1_000_000.0;
+        assert!(
+            approx_eq(costs.stamp_duty, expected_stamp),
+            "Expected delivery stamp duty {}, got {}",
+            expected_stamp,
+            costs.stamp_duty
+        );
+    }
+
+    // Test 12: Equity intraday also has zero brokerage
     #[test]
     fn test_equity_intraday_zero_brokerage() {
         let model = ZerodhaCostModel;
