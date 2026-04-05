@@ -9,8 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd engine
 cargo build                          # build all crates
 cargo build --release -p backtest-cli # release build of CLI binary
-cargo test                           # run all tests (169 tests across workspace)
-cargo test -p backtest-core           # test single crate (142 tests)
+cargo test                           # run all tests (176 tests across workspace)
+cargo test -p backtest-core           # test single crate (149 tests)
 cargo test -p backtest-core -- matching  # test single module
 ```
 
@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (105 tests)
+pytest tests/ -v                     # run strategy tests (95 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -61,6 +61,7 @@ Dependency flow: `cli → data → core → proto`
 ### Python (`strategies/`)
 
 - `strategies/base.py` — Abstract `Strategy` class with `required_data()`, `initialize()`, `on_bar()`, `on_complete()`. Also defines `MarketSnapshot`, `BarData`, `InstrumentInfo`, `FillInfo`, `OrderRejection`, `TradeInfo`, `SessionContext`, `PendingOrder`.
+- `strategies/position_manager.py` — Shared `PositionManager` class handling all order lifecycle: entries (LIMIT/MARKET), engine SL-M stops, trailing stop ratcheting, profit targets, fill detection, DAY expiry re-submission, portfolio reconciliation. Deterministic strategies use this instead of managing orders directly.
 - `strategies/indicators.py` — Shared technical indicators: `compute_sma`, `compute_ema`, `compute_rsi`, `compute_atr`.
 - `strategies/llm_base.py` — `LLMStrategy` subclass of `Strategy`. Handles Azure OpenAI client init, snapshot formatting, and signal parsing. LLM strategies subclass this and implement `build_prompt()`.
 - `strategies/llm_client.py` — `AzureOpenAIClient` wrapper. Reads env vars, calls Azure OpenAI REST API, retry with backoff on HTTP errors and network failures.
@@ -80,7 +81,7 @@ Dependency flow: `cli → data → core → proto`
 
 ### Event Loop (`BacktestEngine::run`)
 
-Per timestamp: check kill switch → process pending orders (with gap handling, volume constraints, circuit limits) → update portfolio prices → auto-squareoff MIS positions at 15:20 IST → check daily loss limit → build `MarketSnapshot` with all timeframes, lookback, fills (with costs), rejections, pending orders, trades, instruments → call strategy via gRPC → submit new orders with risk checks (margin, position limit, exposure limit). Market orders fill at next bar's open. Limit/SL orders handle gaps (fill at bar.open when gapped through). SL-M orders fill at market price with slippage. Costs applied per fill via `ZerodhaCostModel`. Short selling supported (negative positions).
+Per timestamp: check kill switch → MIS auto-squareoff at 15:20 IST → DAY order expiry at 15:30 IST → process pending orders (with gap handling, volume constraints, circuit limits) → update portfolio prices → check daily loss limit → build `MarketSnapshot` with all timeframes, lookback, fills (with costs), rejections, pending orders, trades, instruments → call strategy via gRPC → reject MIS orders after 15:15 IST → submit new orders with risk checks (CNC short restriction, margin, position limit, exposure limit). Market orders fill at next bar's open. Limit/SL orders handle gaps (fill at bar.open when gapped through). SL two-price model: trigger_price activates, limit_price fills. SL-M orders fill at market price with slippage. Force-close fills (kill switch, squareoff, daily loss) include slippage. Costs applied per fill via `ZerodhaCostModel`. Short selling supported (negative positions, MIS only).
 
 ### Data Storage
 
@@ -101,13 +102,16 @@ Per timestamp: check kill switch → process pending orders (with gap handling, 
 - `fetch_candles_chunked` auto-splits requests to stay under Kite's 2000-candle limit
 - The `StrategyClient` trait in `engine.rs` is the abstraction boundary — `GrpcStrategyClient` is the production impl, tests use mock impls
 - Shared technical indicators in `strategies/indicators.py` — all strategies import from here, no duplication
-- Short selling: positions can be negative. Selling without a position creates a short. Buying covers a short. `ClosedTrade.direction` is `Long` or `Short`.
-- MIS auto-squareoff: all MIS positions are force-closed at 15:20 IST each trading day
-- Order cancellation: strategies can send `action=CANCEL` to remove pending limit/SL orders. Pending orders visible in `MarketSnapshot.pending_orders`.
+- **PositionManager** (`strategies/position_manager.py`): shared order lifecycle class. Deterministic strategies delegate entries, exits, stop management, fill detection, DAY expiry re-submission, and reconciliation to this class. Strategies only implement trading logic (~120-150 lines each). New strategies should use PositionManager rather than managing orders directly.
+- Short selling: positions can be negative. Selling without a position creates a short. Buying covers a short. `ClosedTrade.direction` is `Long` or `Short`. CNC shorts are rejected — use MIS for intraday shorts only.
+- MIS auto-squareoff: all MIS positions are force-closed at 15:20 IST each trading day (with slippage). Happens BEFORE strategy on_bar call. New MIS orders rejected after 15:15 IST.
+- Order cancellation: strategies can send `action=CANCEL` to remove pending limit/SL orders. `cancel_order_id` targets a specific order by ID. Pending orders visible in `MarketSnapshot.pending_orders` with `order_id`.
 - Gap handling: limit/SL orders that gap through fill at `bar.open` (not the limit/stop price)
+- SL two-price model: `trigger_price` activates the order, `limit_price` is the fill limit. If price gaps past the limit, the SL becomes a pending limit order. When `trigger_price=0`, falls back to `stop_price` behavior. Slippage applied to all SL fills.
 - Volume constraints: fills clamped to `max_volume_pct` of bar volume (default 1.0 = unconstrained). Remainder stays pending.
+- DAY validity: all pending DAY orders expire at 15:30 IST. IOC orders cancelled if unfilled on current bar. PositionManager handles re-submission of expired stops/targets.
 - Risk controls (all optional via config/CLI flags):
-  - `max_drawdown_pct`: kill switch — force-close all positions and stop trading when drawdown exceeds threshold
+  - `max_drawdown_pct`: kill switch — force-close all positions (with slippage) and stop trading when drawdown exceeds threshold
   - `daily_loss_limit`: reject new buys and close MIS after daily loss exceeds limit, resets next day
   - `max_position_qty`: clamp per-symbol position size
   - `max_exposure_pct`: reject buys that would push total exposure above % of capital
@@ -115,21 +119,15 @@ Per timestamp: check kill switch → process pending orders (with gap handling, 
 - `CandleStore.write()` merges new bars with existing data (deduplicates by timestamp). Does not overwrite.
 - Corporate actions: `instruments.db` has `corporate_actions` table. `adjust_for_corporate_actions()` adjusts pre-action OHLCV for splits/bonuses/dividends. Applied in CLI before engine run.
 - Reference symbols: `--reference-symbols` loads non-tradable index data (e.g., NIFTY 50) into snapshots. Engine ignores signals for reference symbols.
-- Metrics: sample std dev (N-1) for Sharpe/Sortino, CAGR from actual equity curve, per-symbol breakdown, monthly returns, benchmark comparison (buy-and-hold alpha), trade duration stats.
+- Metrics: sample std dev (N-1) for Sharpe/Sortino with configurable risk-free rate (default 7% for India), CAGR from actual equity curve, per-symbol breakdown, monthly returns, benchmark comparison (buy-and-hold alpha), trade duration stats.
 - Reporting: `results show` displays per-symbol P&L table, monthly returns, benchmark/alpha, trade duration
 - `ClosedTrade.pnl` is net of costs. `Fill.costs` tracks per-fill transaction costs passed to strategies via gRPC.
 - `BarData` includes `timestamp_ms` for time-aware analysis in strategy history
 - Lookback buffers are pre-populated from bars before `--from` date — strategies get full history from the first `on_bar` call, no warmup API calls
 - Test data generator uses IST (UTC+5:30) timestamps and skips NSE holidays
 - Zerodha charges zero brokerage on all equity trades (CNC and MIS). ₹20/order (per side) applies to F&O only.
-- Cost model (`ZerodhaCostModel`): zero equity brokerage, STT (0.1% delivery both sides, 0.025% intraday sell-only), transaction charges, GST, SEBI fees, stamp duty
-- CLI `run` command supports `--exchange` flag (default NSE) for BSE/MCX backtesting
+- Cost model (`ZerodhaCostModel`): zero equity brokerage, STT (0.1% delivery both sides, 0.025% intraday sell-only), transaction charges (0.00307%), GST (18% on brokerage + txn + SEBI fees), SEBI fees (₹10/crore), stamp duty (0.015% delivery, 0.003% intraday — buy side only)
+- CLI `run` command supports `--exchange` flag (default NSE) for BSE/MCX backtesting, `--risk-free-rate` (default 0.07)
 - Instrument metadata is loaded from `instruments.db` and passed to the engine for correct cost model (instrument type) and strategy use
-- **Zerodha API alignment (strict enforcement):**
-  - DAY validity: all pending orders (limit, SL, SL-M) expire at 15:30 IST each trading day. Strategies must re-place orders on the next day.
-  - IOC validity: `validity="IOC"` orders are cancelled if unfilled on the current bar.
-  - CNC short restriction: selling without a CNC long position is rejected with `CNC_SHORT_NOT_ALLOWED`. Use MIS for intraday shorts.
-  - SL two-price model: `trigger_price` activates the order, `limit_price` is the fill limit. If price gaps past the limit, the SL becomes a pending limit order (may not fill). When `trigger_price=0`, falls back to legacy `stop_price` behavior.
-  - Per-order cancellation: `cancel_order_id` targets a specific order by ID. Without it, all orders for the symbol are cancelled. Order IDs are sequential, visible in `PendingOrderInfo.order_id`.
-  - Order modification is NOT supported. Use CANCEL + new order (adds one bar of latency vs Zerodha's atomic modify).
-  - Cover orders (CO) are NOT supported. Strategies pair entry + SL-M orders manually for the same effect.
+- Order modification is NOT supported. Use CANCEL + new order.
+- Cover orders (CO) are NOT supported. Strategies pair entry + SL-M orders manually via PositionManager.

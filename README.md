@@ -244,15 +244,15 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 ### Signal fields
 
-`action` (BUY/SELL/HOLD/CANCEL), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`, `product_type` (CNC/MIS/NRML)
+`action` (BUY/SELL/HOLD/CANCEL), `symbol`, `quantity`, `order_type` (MARKET/LIMIT/SL/SL_M), `limit_price`, `stop_price`, `trigger_price`, `product_type` (CNC/MIS/NRML), `validity` (DAY/IOC), `cancel_order_id`
 
 ## Running Tests
 
 ```bash
-# Rust (156 tests)
+# Rust (176 tests)
 cd engine && cargo test
 
-# Python (76 tests)
+# Python (95 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
