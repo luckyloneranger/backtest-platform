@@ -27,12 +27,12 @@ class DonchianBreakout(Strategy):
         self.atr_period = config.get("atr_period", 14)
         self.atr_multiplier = config.get("atr_multiplier", 2.0)
         self.volume_factor = config.get("volume_factor", 1.0)
-        self.risk_per_trade = config.get("risk_per_trade", 0.015)
+        self.risk_per_trade = config.get("risk_per_trade", 0.01)
         self.profit_target_atr = config.get("profit_target_atr", 2.0)
         self.max_loss_pct = config.get("max_loss_pct", 0.02)
         self.max_hold_bars = config.get("max_hold_bars", 30)
         self.pyramid_levels = config.get("pyramid_levels", 2)
-        self.min_adx = config.get("min_adx", 20)
+        self.min_adx = config.get("min_adx", 0)
         self.instruments = instruments
 
         self.pm = PositionManager(max_pending_bars=1)
