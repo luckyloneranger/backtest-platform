@@ -18,6 +18,8 @@ from strategies.indicators import (
     compute_correlation,
     compute_cointegration,
     compute_halflife,
+    compute_vwap,
+    compute_vwap_bands,
 )
 
 
@@ -376,3 +378,37 @@ def test_insufficient_data_returns_none():
     assert compute_correlation(short, short) is None
     assert compute_cointegration(short, short) is None
     assert compute_halflife(short) is None
+
+
+# === VWAP ===
+
+def test_compute_vwap():
+    highs = [102.0, 104.0, 103.0, 105.0, 106.0]
+    lows = [98.0, 100.0, 99.0, 101.0, 102.0]
+    closes = [100.0, 102.0, 101.0, 103.0, 104.0]
+    volumes = [1000, 2000, 1500, 3000, 2500]
+    result = compute_vwap(highs, lows, closes, volumes)
+    assert result is not None
+    # TP = [100, 102, 101, 103, 104], weighted by volume
+    # Manual: (100*1000 + 102*2000 + 101*1500 + 103*3000 + 104*2500) / 10000
+    expected = (100000 + 204000 + 151500 + 309000 + 260000) / 10000.0
+    assert abs(result - expected) < 0.01
+
+
+def test_compute_vwap_insufficient():
+    assert compute_vwap([], [], [], []) is None
+
+
+def test_compute_vwap_bands():
+    highs = [102.0, 104.0, 103.0, 105.0, 106.0]
+    lows = [98.0, 100.0, 99.0, 101.0, 102.0]
+    closes = [100.0, 102.0, 101.0, 103.0, 104.0]
+    volumes = [1000, 2000, 1500, 3000, 2500]
+    result = compute_vwap_bands(highs, lows, closes, volumes, std_mult=1.0)
+    assert result is not None
+    vwap, upper, lower = result
+    assert upper > vwap > lower
+
+
+def test_compute_vwap_bands_insufficient():
+    assert compute_vwap_bands([], [], [], []) is None

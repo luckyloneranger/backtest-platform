@@ -244,6 +244,35 @@ def compute_cointegration(
         return None
 
 
+def compute_vwap(highs: list[float], lows: list[float], closes: list[float],
+                 volumes: list[int]) -> float | None:
+    """Cumulative VWAP = sum(typical_price * volume) / sum(volume).
+    Typical price = (high + low + close) / 3.
+    Caller provides today's intraday bars only (VWAP resets daily)."""
+    if len(highs) < 1 or len(volumes) < 1:
+        return None
+    tp = np.array([(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)])
+    vol = np.array(volumes, dtype=float)
+    total_vol = vol.sum()
+    if total_vol == 0:
+        return None
+    return float((tp * vol).sum() / total_vol)
+
+
+def compute_vwap_bands(highs: list[float], lows: list[float], closes: list[float],
+                       volumes: list[int], std_mult: float = 1.0) -> tuple[float, float, float] | None:
+    """Returns (vwap, upper_band, lower_band).
+    Bands = VWAP +/- std_mult * std_dev of (typical_price - vwap)."""
+    vwap = compute_vwap(highs, lows, closes, volumes)
+    if vwap is None:
+        return None
+    tp = np.array([(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)])
+    std = float(np.std(tp - vwap))
+    if std == 0:
+        return (vwap, vwap, vwap)
+    return (vwap, vwap + std_mult * std, vwap - std_mult * std)
+
+
 def compute_halflife(series: list[float]) -> int | None:
     """Mean-reversion halflife via OLS on lagged spread."""
     if len(series) < 20:
