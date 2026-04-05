@@ -29,7 +29,7 @@ class RsiDailyTrend(Strategy):
         self.rsi_partial_exit = config.get("rsi_partial_exit", 60)
         self.rsi_full_exit = config.get("rsi_full_exit", 70)
         self.ema_period = config.get("ema_period", 20)
-        self.risk_pct = config.get("risk_pct", 0.2)
+        self.risk_pct = config.get("risk_pct", 0.3)
         self.max_pyramid_levels = config.get("max_pyramid_levels", 2)
         self.atr_period = config.get("atr_period", 14)
         self.atr_multiplier = config.get("atr_multiplier", 2.0)
