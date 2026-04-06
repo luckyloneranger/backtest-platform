@@ -227,6 +227,9 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `time_adaptive` | Intraday | 5min | Switches momentum/reversion by time-of-day (opening/midday/closing sessions). |
 | `relative_strength` | Intraday | 15min | Long top 3 stocks, short bottom 3 by opening momentum. Market-neutral. |
 | `multi_tf_confirm` | Multi-TF | 5+15min+day | Triple confirmation: daily EMA direction + 15min MACD + 5min RSI timing. |
+| `ml_classifier` | ML | day | GradientBoosting classifier with 20+ features, rolling training, confidence-gated entries. |
+| `ou_mean_reversion` | ML/Stats | day | Ornstein-Uhlenbeck mean reversion — statistically validated via statsmodels OLS. **Consistently profitable.** |
+| `ensemble_meta` | ML | day | Adaptive ensemble — LogisticRegression learns which sub-signal combinations predict returns. |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
 
 ## Strategy Interface
@@ -263,7 +266,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (176 tests)
 cd engine && cargo test
 
-# Python (255 tests)
+# Python (283 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
