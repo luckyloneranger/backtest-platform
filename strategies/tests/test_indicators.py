@@ -20,6 +20,7 @@ from strategies.indicators import (
     compute_halflife,
     compute_vwap,
     compute_vwap_bands,
+    compute_features,
 )
 
 
@@ -412,3 +413,71 @@ def test_compute_vwap_bands():
 
 def test_compute_vwap_bands_insufficient():
     assert compute_vwap_bands([], [], [], []) is None
+
+
+# === compute_features ===
+
+
+def _make_trending_data(n: int = 60):
+    """Generate n bars of realistic trending price data for feature tests."""
+    import numpy as np
+
+    rng = np.random.RandomState(42)
+    base = 100.0
+    closes = []
+    highs = []
+    lows = []
+    volumes = []
+    for i in range(n):
+        c = base + i * 0.5 + rng.normal(0, 1)
+        h = c + abs(rng.normal(0, 1.5))
+        l = c - abs(rng.normal(0, 1.5))
+        v = int(1000 + rng.randint(0, 500))
+        closes.append(c)
+        highs.append(h)
+        lows.append(l)
+        volumes.append(v)
+    return closes, highs, lows, volumes
+
+
+def test_compute_features_basic():
+    """Provide 60 bars, verify returns dict with 10+ features."""
+    closes, highs, lows, volumes = _make_trending_data(60)
+    result = compute_features(closes, highs, lows, volumes)
+    assert result is not None
+    assert isinstance(result, dict)
+    assert len(result) >= 10
+
+
+def test_compute_features_insufficient():
+    """Provide 30 bars, verify returns None."""
+    closes, highs, lows, volumes = _make_trending_data(60)
+    result = compute_features(closes[:30], highs[:30], lows[:30], volumes[:30])
+    assert result is None
+
+
+def test_compute_features_has_key_features():
+    """Verify rsi_14, macd_hist, adx_14, ret_5 are present."""
+    closes, highs, lows, volumes = _make_trending_data(60)
+    result = compute_features(closes, highs, lows, volumes)
+    assert result is not None
+    for key in ["rsi_14", "macd_hist", "adx_14", "ret_5"]:
+        assert key in result, f"Missing expected feature: {key}"
+
+
+def test_compute_features_value_ranges():
+    """Verify feature values are in expected ranges."""
+    closes, highs, lows, volumes = _make_trending_data(60)
+    result = compute_features(closes, highs, lows, volumes)
+    assert result is not None
+    # RSI should be 0-100
+    assert 0 <= result["rsi_14"] <= 100
+    # rsi_pctrank is RSI/100 so should be 0-1
+    assert 0 <= result["rsi_pctrank"] <= 1.0
+    # ADX should be 0-100
+    assert 0 <= result["adx_14"] <= 100
+    # ATR norm should be positive
+    assert result["atr_norm"] > 0
+    # Bollinger %B typically between -0.5 and 1.5 for normal data
+    if "bb_pct_b" in result:
+        assert -1.0 <= result["bb_pct_b"] <= 2.0

@@ -273,6 +273,110 @@ def compute_vwap_bands(highs: list[float], lows: list[float], closes: list[float
     return (vwap, vwap + std_mult * std, vwap - std_mult * std)
 
 
+def compute_features(
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    volumes: list[int],
+    period: int = 20,
+) -> dict[str, float] | None:
+    """Compute 20+ ML features from price/volume data.
+
+    Returns dict of feature_name -> value, or None if insufficient data.
+    All features are computed from existing indicator functions.
+    Requires at least 50 bars of data.
+    """
+    if len(closes) < 50 or len(highs) < 50 or len(lows) < 50 or len(volumes) < 50:
+        return None
+
+    features: dict[str, float] = {}
+
+    # --- RSI ---
+    rsi = compute_rsi(closes, 14)
+    if rsi is not None:
+        features["rsi_14"] = rsi
+        # Normalized RSI as percentile proxy (0-1 range)
+        features["rsi_pctrank"] = rsi / 100.0
+
+    # --- MACD ---
+    macd = compute_macd(closes)
+    if macd is not None:
+        features["macd_hist"] = macd[2]  # histogram
+        # MACD histogram slope (vs 3 bars ago)
+        macd_prev = compute_macd(closes[:-3]) if len(closes) > 38 else None
+        if macd_prev is not None:
+            features["macd_hist_slope"] = macd[2] - macd_prev[2]
+
+    # --- Bollinger %B ---
+    bb = compute_bollinger(closes, period)
+    if bb is not None:
+        upper, mid, lower = bb
+        bb_range = upper - lower
+        if bb_range > 0:
+            features["bb_pct_b"] = (closes[-1] - lower) / bb_range
+
+    # --- BBW ---
+    bbw = compute_bbw(closes, period)
+    if bbw is not None:
+        features["bbw"] = bbw
+
+    # --- ADX ---
+    adx = compute_adx(highs, lows, closes, 14)
+    if adx is not None:
+        features["adx_14"] = adx
+
+    # --- OBV slope ---
+    obv_slope = compute_obv_slope(closes, volumes, 10)
+    if obv_slope is not None:
+        features["obv_slope_10"] = obv_slope
+
+    # --- ATR normalized ---
+    atr = compute_atr(highs, lows, closes, 14)
+    if atr is not None and closes[-1] > 0:
+        features["atr_norm"] = atr / closes[-1]
+
+    # --- Volume z-score ---
+    if len(volumes) >= period:
+        vol_series = [float(v) for v in volumes[-period:]]
+        vol_mean = sum(vol_series) / len(vol_series)
+        vol_std = (sum((v - vol_mean) ** 2 for v in vol_series) / len(vol_series)) ** 0.5
+        if vol_std > 0:
+            features["volume_zscore"] = (float(volumes[-1]) - vol_mean) / vol_std
+
+    # --- Returns at various lookbacks ---
+    for lb in [1, 5, 10, 20]:
+        if len(closes) > lb and closes[-(lb + 1)] > 0:
+            features[f"ret_{lb}"] = (closes[-1] - closes[-(lb + 1)]) / closes[-(lb + 1)]
+
+    # --- Return autocorrelation ---
+    if len(closes) > 21:
+        rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(-20, 0)]
+        rets_lag = [(closes[i - 1] - closes[i - 2]) / closes[i - 2] for i in range(-20, 0)]
+        if len(rets) == len(rets_lag) == 20:
+            corr = compute_correlation(rets, rets_lag, 20)
+            if corr is not None:
+                features["ret_autocorr"] = corr
+
+    # --- Stochastic ---
+    stoch = compute_stochastic(highs, lows, closes, 14, 3)
+    if stoch is not None:
+        features["stoch_k"] = stoch[0]
+        features["stoch_d"] = stoch[1]
+
+    # --- SMA ratio (close / SMA) ---
+    sma = compute_sma(closes, period)
+    if sma is not None and sma > 0:
+        features["close_sma_ratio"] = closes[-1] / sma
+
+    # --- EMA ratio (close / EMA) ---
+    ema = compute_ema(closes, period)
+    if ema is not None and ema > 0:
+        features["close_ema_ratio"] = closes[-1] / ema
+
+    # Require at least 10 valid features for a usable feature vector
+    return features if len(features) >= 10 else None
+
+
 def compute_halflife(series: list[float]) -> int | None:
     """Mean-reversion halflife via OLS on lagged spread."""
     if len(series) < 20:
