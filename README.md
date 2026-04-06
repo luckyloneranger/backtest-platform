@@ -213,12 +213,14 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 
 | Strategy | Type | Timeframes | Description |
 |----------|------|-----------|-------------|
-| `sma_crossover` | Deterministic | day | SMA crossover (5/20) with ATR sizing, trailing stops, pyramiding, long+short |
+| `sma_crossover` | Deterministic | day | SMA crossover (10/30) with ATR sizing, trailing stops, pyramiding, long+short |
 | `rsi_daily_trend` | Deterministic | 15min + day | RSI mean reversion with pyramid entries (RSI 35/25/15), partial exits, ATR stops, cooldown, long+short |
-| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with ADX trend filter, risk-based sizing, trailing stops, long+short |
+| `donchian_breakout` | Deterministic | 15min + day | Donchian channel breakout with risk-based sizing (0.01), wider stops (2x ATR), long+short |
 | `confluence` | Deterministic | day | Multi-indicator confluence (RSI+MACD+Bollinger+ADX+OBV) — trades when 2+ indicators agree |
 | `pairs_trading` | Deterministic | day | Statistical pairs trading via cointegration — market-neutral, trades spread z-score |
-| `regime_adaptive` | Deterministic | 15min + day | Regime detection (trending/ranging/volatile) with smoothing — switches sub-strategies based on ADX+BBW |
+| `regime_adaptive` | Deterministic | 15min + day | Regime detection (trending/ranging/volatile) with 3-bar smoothing — switches sub-strategies |
+| `vwap_reversion` | Intraday | 5min | VWAP mean reversion — buy below VWAP-2.5σ, exit at VWAP. Pure MIS, daily reset. |
+| `bollinger_squeeze` | Intraday | 5min | Bollinger squeeze breakout — enter on volatility expansion after compression. Pure MIS. |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
 
 ## Strategy Interface
@@ -255,7 +257,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (176 tests)
 cd engine && cargo test
 
-# Python (161 tests)
+# Python (188 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end

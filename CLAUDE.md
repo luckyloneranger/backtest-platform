@@ -20,7 +20,7 @@ cd strategies
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ./generate_proto.sh                  # regenerate gRPC stubs from proto
-pytest tests/ -v                     # run strategy tests (161 tests)
+pytest tests/ -v                     # run strategy tests (188 tests)
 python -m server.server              # start gRPC server on port 50051
 ```
 
@@ -62,14 +62,16 @@ Dependency flow: `cli → data → core → proto`
 
 - `strategies/base.py` — Abstract `Strategy` class with `required_data()`, `initialize()`, `on_bar()`, `on_complete()`. Also defines `MarketSnapshot`, `BarData`, `InstrumentInfo`, `FillInfo`, `OrderRejection`, `TradeInfo`, `SessionContext`, `PendingOrder`.
 - `strategies/position_manager.py` — Shared `PositionManager` class handling all order lifecycle: entries (LIMIT/MARKET), engine SL-M stops, trailing stop ratcheting, profit targets, fill detection, DAY expiry re-submission, portfolio reconciliation. Deterministic strategies use this instead of managing orders directly.
-- `strategies/indicators.py` — Shared technical indicators backed by pandas-ta: `compute_sma`, `compute_ema`, `compute_rsi`, `compute_atr`, `compute_macd`, `compute_bollinger`, `compute_adx`, `compute_obv`, `compute_obv_slope`, `compute_stochastic`, `compute_bbw`, `compute_zscore`, `compute_correlation`, `compute_cointegration`, `compute_halflife`. All accept `list[float]`, return plain Python types. Strategies never import pandas-ta directly.
+- `strategies/indicators.py` — Shared technical indicators backed by pandas-ta: `compute_sma`, `compute_ema`, `compute_rsi`, `compute_atr`, `compute_macd`, `compute_bollinger`, `compute_adx`, `compute_obv`, `compute_obv_slope`, `compute_stochastic`, `compute_bbw`, `compute_zscore`, `compute_correlation`, `compute_cointegration`, `compute_halflife`, `compute_vwap`, `compute_vwap_bands`. All accept `list[float]`, return plain Python types. Strategies never import pandas-ta directly.
 - `strategies/llm_base.py` — `LLMStrategy` subclass of `Strategy`. Handles Azure OpenAI client init, snapshot formatting, and signal parsing. LLM strategies subclass this and implement `build_prompt()`.
 - `strategies/llm_client.py` — `AzureOpenAIClient` wrapper. Reads env vars, calls Azure OpenAI REST API, retry with backoff on HTTP errors and network failures.
 - `server/registry.py` — `@register("name")` decorator for strategy discovery
 - `server/server.py` — gRPC server: handles `GetRequirements`, `Initialize`, `OnBar`, `OnComplete`
 - Deterministic strategies go in `strategies/strategies/deterministic/`, LLM strategies in `strategies/strategies/llm/`, all decorated with `@register`
 - **6 deterministic strategies**: `sma_crossover`, `rsi_daily_trend`, `donchian_breakout` (original), `confluence`, `pairs_trading`, `regime_adaptive` (new, pandas-ta powered). 1 LLM: `llm_signal_generator`.
+- **2 intraday 5-min strategies**: `vwap_reversion` (VWAP band mean-reversion), `bollinger_squeeze` (volatility squeeze breakout). Both pure MIS with daily state resets.
 - **Strategy tuning insights**: Mean-reversion strategies (RSI) need large positions (`risk_pct=0.3`) and long cooldowns to avoid overtrading. Trend-following strategies (Donchian) benefit from smaller positions (`risk_per_trade=0.01`) and wider stops (`atr_mult=2.0`) to survive drawdowns. Reducing risk_pct from 0.3→0.2 destroyed RSI's edge by generating 4x more trades. Confluence exit speed matters: exiting at score<1 (vs ≤0) improved returns by +6-9% across both years. Regime smoothing (3-bar confirmation) is necessary but insufficient — still 1,400 trades/year. Pairs trading returns near 0% regardless of parameters — NSE stock spreads too tight for mean-reversion after costs. **Parameters that work for trending year (2024) often fail in choppy year (2025) and vice versa.**
+- **Position sizing safety**: ATR-based sizing must be capped to available cash (`qty = min(qty, cash/price)`) to prevent leverage blow-ups at low capital. Without this cap, small 5-min ATR values produce position sizes exceeding account value.
 
 ### Strategy Data Flow
 
