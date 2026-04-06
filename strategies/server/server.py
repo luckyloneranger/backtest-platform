@@ -28,6 +28,7 @@ import strategies.deterministic.confluence  # noqa: F401
 import strategies.deterministic.pairs_trading  # noqa: F401
 import strategies.deterministic.vwap_reversion  # noqa: F401
 import strategies.deterministic.bollinger_squeeze  # noqa: F401
+import strategies.deterministic.orb_breakout  # noqa: F401
 import strategies.llm.llm_signal_generator  # noqa: F401
 
 
