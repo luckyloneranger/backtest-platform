@@ -33,6 +33,7 @@ import strategies.deterministic.intraday_momentum  # noqa: F401
 import strategies.deterministic.portfolio_combiner  # noqa: F401
 import strategies.deterministic.time_adaptive  # noqa: F401
 import strategies.deterministic.relative_strength  # noqa: F401
+import strategies.deterministic.multi_tf_confirm  # noqa: F401
 import strategies.llm.llm_signal_generator  # noqa: F401
 
 
