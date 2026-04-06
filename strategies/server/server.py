@@ -238,4 +238,8 @@ def serve(port: int = 50051):
 
 
 if __name__ == "__main__":
-    serve()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=50051)
+    args = parser.parse_args()
+    serve(args.port)
