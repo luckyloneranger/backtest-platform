@@ -221,6 +221,12 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `regime_adaptive` | Deterministic | 15min + day | Regime detection (trending/ranging/volatile) with 3-bar smoothing — switches sub-strategies |
 | `vwap_reversion` | Intraday | 5min | VWAP mean reversion — buy below VWAP-2.5σ, exit at VWAP. Pure MIS, daily reset. |
 | `bollinger_squeeze` | Intraday | 5min | Bollinger squeeze breakout — enter on volatility expansion after compression. Pure MIS. |
+| `orb_breakout` | Intraday | 5min | Opening Range Breakout — trade first 30-min range breakout with volume. Pure MIS. |
+| `portfolio_combiner` | Adaptive | 15min + day | **Best strategy** — Donchian breakout when trending (ADX>25), RSI mean-reversion when ranging (ADX<20). +32%/+39% across 2024/2025. |
+| `intraday_momentum` | Intraday | 5min | Pure momentum — enter on 3-bar burst > 1.5x ATR with volume. Trail 1x ATR. |
+| `time_adaptive` | Intraday | 5min | Switches momentum/reversion by time-of-day (opening/midday/closing sessions). |
+| `relative_strength` | Intraday | 15min | Long top 3 stocks, short bottom 3 by opening momentum. Market-neutral. |
+| `multi_tf_confirm` | Multi-TF | 5+15min+day | Triple confirmation: daily EMA direction + 15min MACD + 5min RSI timing. |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
 
 ## Strategy Interface
@@ -257,7 +263,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (176 tests)
 cd engine && cargo test
 
-# Python (188 tests)
+# Python (255 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
