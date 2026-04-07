@@ -61,13 +61,19 @@ YOUR PROCESS FOR EACH DECISION:
    - What data would make you abandon this thesis?
    - Are there conflicting signals you're choosing to ignore? Be honest about them.
 
-4. CONVICTION: Rate 1-10. Only act on 7 or above.
-   - 1-3: Interesting but not tradeable
-   - 4-6: Thesis exists but risks are too high or timing unclear
-   - 7-8: Good setup with manageable risk
-   - 9-10: High conviction, clear thesis with strong evidence
+4. CONVICTION: Rate 1-10. Position size scales with conviction.
+   - 1-6: No action. Not tradeable. Do NOT include in response.
+   - 7: Watchlist only. DO NOT trade. Interesting but not ready.
+   - 8: Moderate conviction → enter at HALF position size
+   - 9: High conviction → enter at THREE-QUARTER position size
+   - 10: Maximum conviction → enter at FULL position size
 
-5. ACTION: If convicted (7+), what specifically?
+   For EXITS (cutting losses, taking profits, closing positions):
+   - 5+: Sufficient to exit. Protecting capital requires less conviction than deploying it.
+
+   You MUST include "CONVICTION: N/10" in your reasoning field.
+
+5. ACTION: If convicted (8+ for entries, 5+ for exits), what specifically?
    - Entry price, stop-loss level, target, position size
    - CNC (will hold for days/weeks) or MIS (exit today)
 
@@ -88,7 +94,8 @@ RESPOND with a JSON array. Each signal must include:
 "product_type": "CNC"|"MIS", \
 "reasoning": "THESIS: ... EVIDENCE: ... CONVICTION: N/10"}}
 
-Return [] if no thesis reaches conviction 7+. Sitting in cash is a valid decision.
+Return [] if no thesis reaches conviction 8+ for entries. Sitting in cash is a valid decision.
+Most days, the right answer is []. The best traders trade rarely.
 """
 
 
@@ -234,7 +241,7 @@ class LLMAutonomousTrader(Strategy):
                 self.experience.detect_missed_opportunities(
                     self._daily_features, self._daily_atrs, held, current_date,
                 )
-                self.experience.reflect(self.client)
+                self.experience.reflect(self.client, current_regime=self._get_current_regime())
 
         # Process 15-min bars
         has_15m = "15minute" in snapshot.timeframes
@@ -258,9 +265,10 @@ class LLMAutonomousTrader(Strategy):
         # Build narrative dashboard
         narrative = self._build_full_narrative(snapshot)
 
-        # Inject learned beliefs into system prompt
+        # Inject learned beliefs into system prompt (regime-filtered)
         active_prompt = self.system_prompt
-        beliefs = self.experience.get_beliefs_narrative()
+        current_regime = self._get_current_regime()
+        beliefs = self.experience.get_beliefs_narrative(current_regime)
         if beliefs:
             active_prompt += "\n" + beliefs
 
@@ -400,6 +408,22 @@ class LLMAutonomousTrader(Strategy):
         ts_s = snapshot.timestamp_ms / 1000.0
         dt = datetime.datetime.fromtimestamp(ts_s, tz=datetime.timezone.utc)
         return dt.strftime("%Y-%m-%d")
+
+    def _get_current_regime(self) -> str:
+        """Determine current market regime from average ADX across portfolio."""
+        adx_values = [
+            f.get("adx_14")
+            for f in self._daily_features.values()
+            if f and f.get("adx_14") is not None
+        ]
+        if not adx_values:
+            return "neutral"
+        avg_adx = sum(adx_values) / len(adx_values)
+        if avg_adx > 25:
+            return "trending"
+        elif avg_adx < 20:
+            return "ranging"
+        return "neutral"
 
     # ------------------------------------------------------------------
     # Analysis computation
@@ -575,12 +599,24 @@ class LLMAutonomousTrader(Strategy):
     # Safety guardrails
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_conviction(reasoning: str) -> int:
+        """Parse conviction score from reasoning text. Returns 0-10."""
+        match = re.search(r"CONVICTION:\s*(\d+)\s*/\s*10", reasoning, re.IGNORECASE)
+        if match:
+            return min(10, max(0, int(match.group(1))))
+        # Fallback: look for just a number after "conviction"
+        match = re.search(r"conviction[:\s]+(\d+)", reasoning, re.IGNORECASE)
+        if match:
+            return min(10, max(0, int(match.group(1))))
+        return 0
+
     def _apply_guardrails(
         self,
         sig: dict,
         snapshot: MarketSnapshot,
     ) -> list[Signal] | None:
-        """Validate and constrain LLM signal. Returns list[Signal] or None."""
+        """Validate and constrain LLM signal with conviction-scaled sizing."""
         known_symbols: set[str] = set()
         for tf in snapshot.timeframes.values():
             known_symbols.update(tf.keys())
@@ -600,6 +636,28 @@ class LLMAutonomousTrader(Strategy):
         if qty <= 0:
             return None
 
+        # Parse conviction from reasoning
+        reasoning = sig.get("reasoning", "")
+        conviction = self._extract_conviction(reasoning)
+
+        # Determine if this is an entry or exit
+        is_entry = (
+            (action == "BUY" and self.pm.is_flat(symbol))
+            or (action == "SELL" and self.pm.is_flat(symbol))
+        )
+        is_exit = (
+            (action == "SELL" and self.pm.is_long(symbol))
+            or (action == "BUY" and self.pm.is_short(symbol))
+        )
+
+        # Conviction threshold: 8+ for entries, 5+ for exits
+        if is_entry and conviction < 8:
+            logger.info("Rejected %s %s: conviction %d < 8", action, symbol, conviction)
+            return None
+        if is_exit and conviction < 5:
+            logger.info("Rejected exit %s %s: conviction %d < 5", action, symbol, conviction)
+            return None
+
         # Get current price
         price = None
         for tf in snapshot.timeframes.values():
@@ -614,6 +672,11 @@ class LLMAutonomousTrader(Strategy):
         qty = min(qty, max_qty)
         if qty <= 0:
             return None
+
+        # Conviction-scaled position sizing for entries
+        if is_entry:
+            scale = {8: 0.5, 9: 0.75, 10: 1.0}.get(conviction, 0.5)
+            qty = max(1, int(qty * scale))
 
         # Max positions check
         open_positions = sum(

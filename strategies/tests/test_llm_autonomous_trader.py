@@ -198,7 +198,7 @@ def test_guardrail_position_cap():
                     "order_type": "MARKET",
                     "product_type": "CNC",
                     "stop_price": 95.0,
-                    "reasoning": "test position cap",
+                    "reasoning": "CONVICTION: 9/10 test position cap",
                 }
             ]
         )
@@ -238,7 +238,7 @@ def test_guardrail_max_positions():
                     "order_type": "MARKET",
                     "product_type": "CNC",
                     "stop_price": 95.0,
-                    "reasoning": "should be rejected",
+                    "reasoning": "CONVICTION: 9/10 should be rejected",
                 }
             ]
         )
@@ -276,7 +276,7 @@ def test_guardrail_auto_stop():
                     "order_type": "MARKET",
                     "product_type": "CNC",
                     "stop_price": 0,
-                    "reasoning": "no stop provided",
+                    "reasoning": "CONVICTION: 8/10 no stop provided",
                 }
             ]
         )
@@ -310,7 +310,7 @@ def test_guardrail_drawdown_scaling():
                     "order_type": "MARKET",
                     "product_type": "CNC",
                     "stop_price": 90.0,
-                    "reasoning": "drawdown test",
+                    "reasoning": "CONVICTION: 9/10 drawdown test",
                 }
             ]
         )
@@ -324,9 +324,8 @@ def test_guardrail_drawdown_scaling():
 
     buy_signals = [sig for sig in signals if sig.action == "BUY"]
     assert len(buy_signals) == 1
-    assert buy_signals[0].quantity == 10
-
-
+    # 20 * 0.75 (conviction 9) = 15, then // 2 (drawdown >10%) = 7
+    assert buy_signals[0].quantity == 7
 def test_llm_failure_returns_hold():
     """Mock LLM error, verify no crash and only PM lifecycle signals."""
     s = _init_strategy()
@@ -392,7 +391,7 @@ def test_short_always_mis():
                     "order_type": "MARKET",
                     "product_type": "CNC",
                     "stop_price": 110.0,
-                    "reasoning": "short entry",
+                    "reasoning": "CONVICTION: 8/10 short entry",
                 }
             ]
         )
@@ -516,14 +515,17 @@ def test_daily_and_m15_buffers_separate():
 
 
 def test_beliefs_injected_into_system_prompt():
-    """Verify beliefs from ExperienceManager appear in LLM system prompt."""
+    """Verify regime-filtered beliefs appear in LLM system prompt."""
     s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
     _warm_up_daily(s)
     _warm_up_m15(s)
     s.bar_count = s.llm_interval_bars - 1
 
-    # Inject beliefs
-    s.experience.beliefs = ["Banks work in trends.", "Avoid ICICIBANK mean-reversion."]
+    # Inject structured beliefs
+    s.experience.beliefs = [
+        {"text": "Banks work in trends.", "regime": "all", "created_at": 0, "strength": 1.0},
+        {"text": "Avoid ICICIBANK.", "regime": "ranging", "created_at": 0, "strength": 1.0},
+    ]
 
     captured = []
     def _capture(messages, **kwargs):
@@ -540,7 +542,7 @@ def test_beliefs_injected_into_system_prompt():
 
 
 def test_experience_records_trade_entry():
-    """When LLM places a BUY, ExperienceManager records the entry context."""
+    """When LLM places a BUY with conviction 8+, ExperienceManager records it."""
     s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
     _warm_up_daily(s)
     _warm_up_m15(s)
@@ -551,7 +553,7 @@ def test_experience_records_trade_entry():
             "action": "BUY", "symbol": "TEST", "quantity": 5,
             "order_type": "MARKET", "product_type": "CNC",
             "stop_price": 95.0,
-            "reasoning": "THESIS: Strong momentum. CONVICTION: 8/10",
+            "reasoning": "THESIS: Strong momentum. EVIDENCE: RSI 35. CONVICTION: 9/10",
         }])
     )
 
@@ -565,11 +567,97 @@ def test_experience_records_trade_entry():
 def test_on_complete_includes_experience_stats():
     """on_complete returns experience metadata."""
     s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
-    s.experience.beliefs = ["Test belief"]
+    s.experience.beliefs = [{"text": "Test belief", "regime": "all", "created_at": 0, "strength": 1.0}]
     result = s.on_complete()
-    assert result["beliefs"] == ["Test belief"]
+    assert result["beliefs"] == [{"text": "Test belief", "regime": "all", "created_at": 0, "strength": 1.0}]
     assert result["reflections"] == 0
     assert result["missed_opportunities"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Conviction parsing and scaling
+# ---------------------------------------------------------------------------
+
+def test_extract_conviction():
+    """Parse conviction score from reasoning text."""
+    s = _init_strategy({"reset_experience": True})
+    assert s._extract_conviction("THESIS: blah. CONVICTION: 8/10") == 8
+    assert s._extract_conviction("CONVICTION: 10/10") == 10
+    assert s._extract_conviction("conviction: 6/10") == 6
+    assert s._extract_conviction("some text conviction 9") == 9
+    assert s._extract_conviction("no conviction mentioned") == 0
+    assert s._extract_conviction("") == 0
+
+
+def test_conviction_below_8_rejected():
+    """Entry with conviction < 8 is rejected by guardrails."""
+    s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
+    _warm_up_daily(s)
+    _warm_up_m15(s)
+    s.bar_count = s.llm_interval_bars - 1
+
+    s.client.chat_completion = MagicMock(
+        return_value=json.dumps([{
+            "action": "BUY", "symbol": "TEST", "quantity": 10,
+            "order_type": "MARKET", "product_type": "CNC",
+            "stop_price": 95.0,
+            "reasoning": "THESIS: Okay setup. CONVICTION: 7/10",
+        }])
+    )
+
+    snap = _make_snapshot(close=100.0, bar_number=100, timestamp_ms=1704067200000)
+    signals = s.on_bar(snap)
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 0  # conviction 7 < threshold 8
+
+
+def test_conviction_8_scales_to_50pct():
+    """Conviction 8 → 50% of requested quantity."""
+    s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
+    _warm_up_daily(s)
+    _warm_up_m15(s)
+    s.bar_count = s.llm_interval_bars - 1
+
+    s.client.chat_completion = MagicMock(
+        return_value=json.dumps([{
+            "action": "BUY", "symbol": "TEST", "quantity": 20,
+            "order_type": "MARKET", "product_type": "CNC",
+            "stop_price": 95.0,
+            "reasoning": "THESIS: Good setup. CONVICTION: 8/10",
+        }])
+    )
+
+    snap = _make_snapshot(close=100.0, bar_number=100, timestamp_ms=1704067200000)
+    signals = s.on_bar(snap)
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == 10  # 20 * 0.5 = 10
+
+
+def test_conviction_10_full_size():
+    """Conviction 10 → 100% of requested quantity."""
+    s = _init_strategy({"initial_capital": 100_000, "reset_experience": True})
+    _warm_up_daily(s)
+    _warm_up_m15(s)
+    s.bar_count = s.llm_interval_bars - 1
+
+    s.client.chat_completion = MagicMock(
+        return_value=json.dumps([{
+            "action": "BUY", "symbol": "TEST", "quantity": 20,
+            "order_type": "MARKET", "product_type": "CNC",
+            "stop_price": 95.0,
+            "reasoning": "THESIS: Perfect setup. CONVICTION: 10/10",
+        }])
+    )
+
+    snap = _make_snapshot(close=100.0, bar_number=100, timestamp_ms=1704067200000)
+    signals = s.on_bar(snap)
+
+    buy_signals = [sig for sig in signals if sig.action == "BUY"]
+    assert len(buy_signals) == 1
+    assert buy_signals[0].quantity == 20  # 20 * 1.0 = 20
 
 
 # Import LLMClientError for LLM failure test
