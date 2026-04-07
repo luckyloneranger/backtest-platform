@@ -38,6 +38,7 @@ import strategies.deterministic.ml_classifier  # noqa: F401
 import strategies.deterministic.ensemble_meta  # noqa: F401
 import strategies.deterministic.ou_mean_reversion  # noqa: F401
 import strategies.llm.llm_signal_generator  # noqa: F401
+import strategies.llm.llm_autonomous_trader  # noqa: F401
 
 
 class StrategyServicer(strategy_pb2_grpc.StrategyServiceServicer):
