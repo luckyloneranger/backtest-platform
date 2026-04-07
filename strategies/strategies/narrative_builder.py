@@ -1,11 +1,14 @@
-"""Narrative builder: translates raw indicator values into qualitative English
-narratives for LLM-based strategies.
+"""Narrative builder: translates raw indicator values into factual English
+summaries for LLM-based strategies.
+
+Presents FACTS without interpretation, conclusions, or suggestions.
+The LLM builds its own thesis from the data.
 
 Four public functions:
-  - build_symbol_narrative   -- per-symbol indicator interpretation
-  - build_regime_narrative   -- market regime description
-  - build_portfolio_narrative -- portfolio-level summary
-  - build_trade_history_narrative -- recent trade history with lessons
+  - build_symbol_narrative       -- per-symbol factual data summary
+  - build_regime_narrative       -- market-wide regime facts
+  - build_portfolio_narrative    -- portfolio-level summary
+  - build_trade_history_narrative -- recent trade outcomes
 """
 
 from __future__ import annotations
@@ -19,169 +22,149 @@ def build_symbol_narrative(
     position: dict | None,  # {qty, avg_price, unrealized_pnl, product_type} or None
     capital: float,
 ) -> str:
-    """Build a qualitative narrative for one symbol."""
+    """Build a factual narrative for one symbol.
+
+    Presents raw indicator values, relative context, and risk math
+    without interpretation or trading suggestions.
+    """
     if features is None:
         return f"{symbol} (₹{close}) — INSUFFICIENT DATA for analysis."
 
     lines = [f"\n{symbol} (₹{close:.2f})"]
 
-    # Position status
+    # --- Position status (factual P&L) ---
     if position:
         pnl_pct = (close - position["avg_price"]) / position["avg_price"] * 100
         lines.append(
-            f"  You hold {position['qty']} shares @ ₹{position['avg_price']:.2f}. "
-            f"P&L: {'+'if pnl_pct > 0 else ''}{pnl_pct:.1f}%"
+            f"  Position: {position['qty']} shares @ ₹{position['avg_price']:.2f}. "
+            f"Unrealized P&L: {'+'if pnl_pct > 0 else ''}{pnl_pct:.1f}%."
         )
+    else:
+        lines.append("  Position: Not held.")
 
-    # RSI interpretation
-    rsi = features.get("rsi_14")
-    if rsi is not None:
-        if rsi < 25:
-            rsi_text = f"RSI at {rsi:.0f} — deeply oversold, strong mean-reversion buy signal"
-        elif rsi < 35:
-            rsi_text = f"RSI at {rsi:.0f} — oversold territory, potential buy opportunity"
-        elif rsi < 45:
-            rsi_text = f"RSI at {rsi:.0f} — slightly below neutral, mild bullish lean"
-        elif rsi < 55:
-            rsi_text = f"RSI at {rsi:.0f} — neutral, no momentum signal"
-        elif rsi < 65:
-            rsi_text = f"RSI at {rsi:.0f} — slightly above neutral, mild bearish lean"
-        elif rsi < 75:
-            rsi_text = f"RSI at {rsi:.0f} — overbought territory, consider taking profits"
-        else:
-            rsi_text = f"RSI at {rsi:.0f} — deeply overbought, mean-reversion sell signal"
-        lines.append(f"  {rsi_text}")
-
-    # ADX interpretation
-    adx = features.get("adx_14")
-    if adx is not None:
-        if adx > 30:
-            adx_text = f"ADX at {adx:.0f} — strong trend in place, favor trend-following"
-        elif adx > 25:
-            adx_text = f"ADX at {adx:.0f} — trending, breakout strategies viable"
-        elif adx > 20:
-            adx_text = f"ADX at {adx:.0f} — transitioning, uncertain regime"
-        else:
-            adx_text = f"ADX at {adx:.0f} — ranging/no trend, mean-reversion strategies preferred"
-        lines.append(f"  {adx_text}")
-
-    # MACD interpretation
-    macd_hist = features.get("macd_hist")
-    macd_slope = features.get("macd_hist_slope")
-    if macd_hist is not None:
-        direction = "positive" if macd_hist > 0 else "negative"
-        if macd_slope is not None:
-            if macd_slope > 0:
-                momentum = "and accelerating"
-            elif macd_slope < -0.5:
-                momentum = "but decelerating"
-            else:
-                momentum = "and stable"
-        else:
-            momentum = ""
-        lines.append(f"  MACD histogram is {direction} {momentum}")
-
-    # Bollinger %B interpretation
-    bb_pct = features.get("bb_pct_b")
-    if bb_pct is not None:
-        if bb_pct > 0.9:
-            bb_text = "Price at upper Bollinger Band — near resistance, may face selling pressure"
-        elif bb_pct > 0.7:
-            bb_text = "Price in upper portion of Bollinger Bands — bullish but approaching resistance"
-        elif bb_pct < 0.1:
-            bb_text = "Price at lower Bollinger Band — near support, potential bounce zone"
-        elif bb_pct < 0.3:
-            bb_text = "Price in lower portion of Bollinger Bands — bearish but approaching support"
-        else:
-            bb_text = "Price in middle of Bollinger Bands — no extreme signal"
-        lines.append(f"  {bb_text}")
-
-    # OBV interpretation
-    obv_slope = features.get("obv_slope_10")
-    if obv_slope is not None:
-        if obv_slope > 0:
-            lines.append("  Volume confirms move (OBV rising — buying pressure)")
-        elif obv_slope < 0:
-            lines.append("  Volume diverges (OBV falling — distribution/selling)")
-        else:
-            lines.append("  Volume neutral (OBV flat — no strong conviction)")
-
-    # Price vs SMA
+    # --- Price action ---
+    price_parts: list[str] = []
+    # Weekly return
+    ret_5 = features.get("ret_5")
+    if ret_5 is not None:
+        pct = ret_5 * 100
+        price_parts.append(f"{'+'if pct > 0 else ''}{pct:.1f}% this week")
+    # Distance from 20-day SMA
     sma_ratio = features.get("close_sma_ratio")
     if sma_ratio is not None:
         pct_from_sma = (sma_ratio - 1.0) * 100
         if abs(pct_from_sma) < 0.5:
-            lines.append("  Price at 20-day average (within 0.5%)")
+            price_parts.append("at 20-day average")
         else:
             above_below = "above" if pct_from_sma > 0 else "below"
-            lines.append(f"  Price is {abs(pct_from_sma):.1f}% {above_below} its 20-day average")
+            price_parts.append(f"{abs(pct_from_sma):.1f}% {above_below} 20-day average")
+    if price_parts:
+        lines.append(f"  Price action: {'. '.join(price_parts)}.")
 
-    # Confluence scoring
-    bullish = 0
-    bearish = 0
+    # --- Momentum ---
+    momentum_parts: list[str] = []
+    rsi = features.get("rsi_14")
     if rsi is not None:
-        if rsi < 35:
-            bullish += 1
-        elif rsi > 65:
-            bearish += 1
+        momentum_parts.append(f"RSI {rsi:.0f}")
+    macd_hist = features.get("macd_hist")
+    macd_slope = features.get("macd_hist_slope")
     if macd_hist is not None:
-        if macd_hist > 0:
-            bullish += 1
-        elif macd_hist < 0:
-            bearish += 1
+        hist_text = f"MACD histogram {macd_hist:+.2f}"
+        if macd_slope is not None:
+            if macd_slope > 0:
+                hist_text += ", rising"
+            elif macd_slope < 0:
+                hist_text += ", falling"
+            else:
+                hist_text += ", flat"
+        momentum_parts.append(hist_text)
+    stoch_k = features.get("stoch_k")
+    stoch_d = features.get("stoch_d")
+    if stoch_k is not None and stoch_d is not None:
+        momentum_parts.append(f"Stochastic %K={stoch_k:.0f} %D={stoch_d:.0f}")
+    if momentum_parts:
+        lines.append(f"  Momentum: {'. '.join(momentum_parts)}.")
+
+    # --- Trend ---
+    trend_parts: list[str] = []
+    adx = features.get("adx_14")
+    if adx is not None:
+        trend_parts.append(f"ADX {adx:.0f}")
+    if sma_ratio is not None:
+        if sma_ratio > 1.0:
+            trend_parts.append("Price above 20-day SMA")
+        elif sma_ratio < 1.0:
+            trend_parts.append("Price below 20-day SMA")
+        else:
+            trend_parts.append("Price at 20-day SMA")
+    ema_ratio = features.get("close_ema_ratio")
+    if ema_ratio is not None:
+        ema_pct = (ema_ratio - 1.0) * 100
+        trend_parts.append(f"{'+'if ema_pct > 0 else ''}{ema_pct:.1f}% from 20-day EMA")
+    if trend_parts:
+        lines.append(f"  Trend: {'. '.join(trend_parts)}.")
+
+    # --- Volatility ---
+    vol_parts: list[str] = []
+    bb_pct = features.get("bb_pct_b")
     if bb_pct is not None:
-        if bb_pct < 0.2:
-            bullish += 1
-        elif bb_pct > 0.8:
-            bearish += 1
+        bb_percentile = bb_pct * 100
+        vol_parts.append(f"Bollinger Band position {bb_percentile:.0f}th percentile")
+    bbw = features.get("bbw")
+    if bbw is not None:
+        vol_parts.append(f"BBW {bbw:.4f}")
+    if atr is not None:
+        vol_parts.append(f"ATR ₹{atr:.2f}")
+    atr_norm = features.get("atr_norm")
+    if atr_norm is not None:
+        vol_parts.append(f"ATR/price {atr_norm:.3f}")
+    if vol_parts:
+        lines.append(f"  Volatility: {'. '.join(vol_parts)}.")
+
+    # --- Volume ---
+    volume_parts: list[str] = []
+    vol_z = features.get("volume_zscore")
+    if vol_z is not None:
+        if abs(vol_z) > 0.1:
+            volume_parts.append(f"Volume z-score {vol_z:+.1f}")
+        else:
+            volume_parts.append("Volume near average")
+    obv_slope = features.get("obv_slope_10")
     if obv_slope is not None:
         if obv_slope > 0:
-            bullish += 1
+            volume_parts.append("OBV rising")
         elif obv_slope < 0:
-            bearish += 1
-    if adx is not None and adx > 25 and sma_ratio is not None:
-        if sma_ratio > 1.0:
-            bullish += 1
-        elif sma_ratio < 1.0:
-            bearish += 1
+            volume_parts.append("OBV declining")
+        else:
+            volume_parts.append("OBV flat")
+    if volume_parts:
+        lines.append(f"  Volume: {'. '.join(volume_parts)}.")
 
-    if bullish >= 3:
-        lines.append(f"  CONFLUENCE: {bullish} of 5 indicators bullish — POTENTIAL LONG ENTRY")
-    elif bearish >= 3:
-        lines.append(f"  CONFLUENCE: {bearish} of 5 indicators bearish — POTENTIAL SHORT ENTRY")
-    elif bullish > 0 and bearish > 0:
-        lines.append(
-            f"  CONFLUENCE: Mixed signals ({bullish} bullish, {bearish} bearish) — CONFLICTING"
-        )
-    else:
-        lines.append("  CONFLUENCE: No strong signals — NO ACTION")
+    # --- Returns context ---
+    ret_parts: list[str] = []
+    ret_1 = features.get("ret_1")
+    if ret_1 is not None:
+        ret_parts.append(f"1-day: {'+'if ret_1 * 100 > 0 else ''}{ret_1 * 100:.1f}%")
+    if ret_5 is not None:
+        ret_parts.append(f"5-day: {'+'if ret_5 * 100 > 0 else ''}{ret_5 * 100:.1f}%")
+    ret_10 = features.get("ret_10")
+    if ret_10 is not None:
+        ret_parts.append(f"10-day: {'+'if ret_10 * 100 > 0 else ''}{ret_10 * 100:.1f}%")
+    ret_20 = features.get("ret_20")
+    if ret_20 is not None:
+        ret_parts.append(f"20-day: {'+'if ret_20 * 100 > 0 else ''}{ret_20 * 100:.1f}%")
+    if ret_parts:
+        lines.append(f"  Returns: {'. '.join(ret_parts)}.")
 
-    # Risk calculation
+    # --- Risk math (pure calculation) ---
     if atr is not None and close > 0:
         stop_distance = 2.0 * atr
         stop_pct = stop_distance / close * 100
         max_shares = int(capital * 0.03 / stop_distance) if stop_distance > 0 else 0
         lines.append(
-            f"  RISK: 2x ATR stop = ₹{stop_distance:.2f} ({stop_pct:.1f}% from entry). "
-            f"Max position at 3% risk: {max_shares} shares"
+            f"  Risk math: 2x ATR stop = ₹{stop_distance:.2f} ({stop_pct:.1f}% from entry). "
+            f"At 3% capital risk, max {max_shares} shares."
         )
-
-    # Action suggestion
-    if position:
-        if bullish >= 3:
-            suggestion = "HOLD — trend continues in your favor"
-        elif bearish >= 3:
-            suggestion = "CONSIDER EXIT — signals turning against you"
-        else:
-            suggestion = "HOLD — no clear exit signal"
-    else:
-        if bullish >= 3:
-            suggestion = "POTENTIAL LONG ENTRY"
-        elif bearish >= 3:
-            suggestion = "POTENTIAL SHORT ENTRY"
-        else:
-            suggestion = "NO ACTION — wait for clearer setup"
-    lines.append(f"  SUGGESTION: {suggestion}")
 
     return "\n".join(lines)
 
@@ -189,53 +172,31 @@ def build_symbol_narrative(
 def build_regime_narrative(
     adx: float | None, bbw: float | None, avg_bbw: float | None
 ) -> str:
-    """Build a market regime narrative from ADX and Bollinger Band Width.
+    """Build a factual market regime narrative.
 
-    Returns 2-3 sentences describing the current regime and which strategies
-    are favored.
+    Presents ADX and BBW values without recommending strategies or actions.
     """
     parts: list[str] = []
 
-    # Determine regime from ADX
     if adx is not None:
-        if adx > 30:
-            parts.append(f"MARKET REGIME: TRENDING (ADX={adx:.0f}).")
-            parts.append(
-                "Trend-following strategies (breakouts, momentum) are favored."
-            )
-        elif adx > 20:
-            parts.append(f"MARKET REGIME: TRANSITIONING (ADX={adx:.0f}).")
-            parts.append(
-                "Market is between trending and ranging — use smaller positions and tighter stops."
-            )
-        else:
-            parts.append(f"MARKET REGIME: RANGING (ADX={adx:.0f}).")
-            parts.append(
-                "Mean-reversion strategies (RSI oversold/overbought) are favored."
-            )
+        parts.append(f"Average ADX across portfolio: {adx:.1f}.")
     else:
-        parts.append("MARKET REGIME: UNKNOWN (ADX unavailable).")
+        parts.append("ADX data unavailable.")
 
-    # Volatility overlay from BBW
     if bbw is not None and avg_bbw is not None and avg_bbw > 0:
         ratio = bbw / avg_bbw
         if ratio > 1.5:
             parts.append(
-                "VOLATILE (high BBW). Consider reducing position sizes or staying flat."
+                f"Bollinger Band Width is {ratio:.1f}x above average — elevated volatility."
             )
         elif ratio < 0.6:
             parts.append(
-                "COMPRESSED volatility (low BBW). A breakout move may be imminent."
+                f"Bollinger Band Width is {ratio:.1f}x below average — compressed volatility."
             )
+        else:
+            parts.append("Bollinger Band Width is at average levels.")
     elif bbw is not None:
-        if bbw > 0.10:
-            parts.append(
-                "VOLATILE (high BBW). Consider reducing position sizes or staying flat."
-            )
-        elif bbw < 0.03:
-            parts.append(
-                "COMPRESSED volatility (low BBW). A breakout move may be imminent."
-            )
+        parts.append(f"Bollinger Band Width: {bbw:.4f}.")
 
     return " ".join(parts)
 
@@ -251,7 +212,7 @@ def build_portfolio_narrative(
     """Build a portfolio-level summary narrative.
 
     Includes total value, drawdown from initial, transaction cost impact,
-    and open position count.
+    and open position count. Factual only — no advice.
     """
     total_value = cash + equity
     total_return_pct = (total_value - initial_capital) / initial_capital * 100 if initial_capital > 0 else 0.0
@@ -270,53 +231,42 @@ def build_portfolio_narrative(
     ]
 
     if drawdown_pct > 0:
-        if drawdown_pct > 10:
-            lines.append(
-                f"  DRAWDOWN: {drawdown_pct:.1f}% from initial capital — DANGER ZONE. "
-                "Consider reducing exposure."
-            )
-        elif drawdown_pct > 5:
-            lines.append(
-                f"  DRAWDOWN: {drawdown_pct:.1f}% from initial capital — caution advised."
-            )
-        else:
-            lines.append(f"  DRAWDOWN: {drawdown_pct:.1f}% from initial capital — within normal range.")
+        lines.append(f"  Drawdown: {drawdown_pct:.1f}% from initial capital.")
     else:
-        lines.append(f"  No drawdown from initial capital — portfolio is in profit.")
+        lines.append("  No drawdown from initial capital — portfolio is in profit.")
 
     return "\n".join(lines)
 
 
 def build_trade_history_narrative(trade_log: list[dict]) -> str:
-    """Build a narrative from recent trade history.
+    """Build a factual narrative from recent trade history.
 
     Each entry: {symbol, side, entry_price, exit_price, pnl, pnl_pct,
                  reasoning, bars_held}
-    Returns summary of last 5 trades, win rate, avg win/loss, profit factor,
-    and a LESSON derived from pattern matching on recent losses.
+    Returns summary of last 5 trades, win rate, avg win/loss, profit factor.
+    No lessons or advice — just outcomes.
     """
     if not trade_log:
         return "TRADE HISTORY: No completed trades yet."
 
     lines = ["TRADE HISTORY:"]
 
-    # Last 5 trades
+    # Last 5 trades — factual outcomes
     recent = trade_log[-5:]
     lines.append(f"  Last {len(recent)} trade(s):")
     for t in recent:
-        outcome = "WIN" if t.get("pnl", 0) > 0 else "LOSS"
+        pnl = t.get("pnl", 0)
         pnl_pct = t.get("pnl_pct", 0.0)
         held = t.get("bars_held", "?")
-        reasoning = t.get("reasoning", "")
-        reason_text = f" ({reasoning})" if reasoning else ""
         lines.append(
             f"    {t.get('symbol','?')} {t.get('side','?')}: "
             f"₹{t.get('entry_price', 0):.2f} → ₹{t.get('exit_price', 0):.2f} "
-            f"= {'+' if pnl_pct > 0 else ''}{pnl_pct:.1f}% [{outcome}] "
-            f"held {held} bars{reason_text}"
+            f"= {'+'if pnl_pct > 0 else ''}{pnl_pct:.1f}% "
+            f"(₹{'+'if pnl > 0 else ''}{pnl:.0f}), "
+            f"held {held} bars"
         )
 
-    # Statistics
+    # Statistics — factual only
     wins = [t for t in trade_log if t.get("pnl", 0) > 0]
     losses = [t for t in trade_log if t.get("pnl", 0) <= 0]
     total = len(trade_log)
@@ -336,53 +286,4 @@ def build_trade_history_narrative(trade_log: list[dict]) -> str:
     else:
         lines.append(f"  Profit factor: {profit_factor:.2f}")
 
-    # LESSON: pattern matching on recent losses
-    lesson = _derive_lesson(trade_log)
-    if lesson:
-        lines.append(f"  LESSON: {lesson}")
-
     return "\n".join(lines)
-
-
-def _derive_lesson(trade_log: list[dict]) -> str:
-    """Analyze recent losses for recurring patterns."""
-    recent_losses = [t for t in trade_log[-10:] if t.get("pnl", 0) <= 0]
-    if len(recent_losses) < 2:
-        return ""
-
-    # Pattern 1: all losses on one side
-    sides = [t.get("side", "") for t in recent_losses]
-    long_losses = sides.count("BUY") + sides.count("LONG")
-    short_losses = sides.count("SELL") + sides.count("SHORT")
-    if long_losses > 0 and short_losses == 0:
-        return (
-            f"All {long_losses} recent losses were LONG entries. "
-            "Consider reducing long bias or requiring stronger confirmation."
-        )
-    if short_losses > 0 and long_losses == 0:
-        return (
-            f"All {short_losses} recent losses were SHORT entries. "
-            "Consider reducing short bias or requiring stronger confirmation."
-        )
-
-    # Pattern 2: quick stops (held <= 3 bars)
-    quick_stops = [t for t in recent_losses if t.get("bars_held", 999) <= 3]
-    if len(quick_stops) >= 2:
-        return (
-            f"{len(quick_stops)} of {len(recent_losses)} losses were stopped out within 3 bars. "
-            "Stops may be too tight — consider widening or using time-based exits."
-        )
-
-    # Pattern 3: losses with high RSI at entry (if reasoning mentions it)
-    overbought_losses = [
-        t for t in recent_losses
-        if "overbought" in t.get("reasoning", "").lower()
-        or "rsi" in t.get("reasoning", "").lower()
-    ]
-    if len(overbought_losses) >= 2:
-        return (
-            f"{len(overbought_losses)} losses had RSI-related entries. "
-            "Entries may be in overbought/oversold conditions that did not reverse."
-        )
-
-    return ""

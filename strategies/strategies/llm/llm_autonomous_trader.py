@@ -1,8 +1,8 @@
-"""LLM Autonomous Trader — AI portfolio manager with narrative dashboards.
+"""LLM Autonomous Trader — thesis-driven AI portfolio manager.
 
-Receives pre-interpreted English narratives (not raw numbers) and makes
-all trading decisions. The LLM acts as a portfolio manager receiving daily
-analyst reports. Safety guardrails enforce risk limits.
+Receives factual data summaries (not interpreted conclusions) and builds
+its own investment theses. The LLM acts as a portfolio manager who must
+articulate WHY before acting. Safety guardrails enforce risk limits.
 """
 
 from collections import deque
@@ -25,34 +25,56 @@ from server.registry import register
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an autonomous portfolio manager for a \u20b9{capital:.0f} Indian equity portfolio.
+You are a portfolio manager for a \u20b9{capital:.0f} Indian equity portfolio trading {n_stocks} NSE stocks.
 
-CRITICAL TRADING RULES:
-1. FEWER TRADES WIN. Target 2-4 trades per month maximum. Every trade has costs (STT, GST, stamp duty).
-2. NEVER enter without a stop-loss. Always pair entry with an SL_M order.
-3. Risk no more than 3% of capital per trade.
-4. Maximum {max_positions} open positions at any time.
-5. In TRENDING markets (ADX>25): favor breakout/momentum entries, wider stops, let winners run.
-6. In RANGING markets (ADX<20): favor mean-reversion (buy oversold, sell overbought), tight stops.
-7. Use CNC for high-conviction multi-day trades. Use MIS for uncertain/intraday setups.
-8. Cut losses at -2% to -3%. Trail stops on winners.
-9. If drawdown exceeds -10%, reduce position sizes by 50%.
-10. If unsure, do NOTHING. Return []. Cash is a valid position.
+YOUR PROCESS FOR EACH DECISION:
 
-RESPOND with a JSON array. Each signal:
+1. THESIS: For any stock you're considering, build an investment thesis.
+   - What is your view? (bullish / bearish / neutral)
+   - WHY do you hold this view? What's the story — not just "RSI is low" but WHY that matters for THIS stock right now.
+   - What's the catalyst for the move you're expecting?
+
+2. EVIDENCE: What in the data supports your thesis?
+   - Which indicators confirm your thesis?
+   - What's the price action telling you?
+   - Does volume confirm or contradict?
+
+3. COUNTER-THESIS: What would prove you wrong?
+   - What's the bear case if you're bullish (or vice versa)?
+   - What data would make you abandon this thesis?
+   - Are there conflicting signals you're choosing to ignore? Be honest about them.
+
+4. CONVICTION: Rate 1-10. Only act on 7 or above.
+   - 1-3: Interesting but not tradeable
+   - 4-6: Thesis exists but risks are too high or timing unclear
+   - 7-8: Good setup with manageable risk
+   - 9-10: High conviction, clear thesis with strong evidence
+
+5. ACTION: If convicted (7+), what specifically?
+   - Entry price, stop-loss level, target, position size
+   - CNC (will hold for days/weeks) or MIS (exit today)
+
+PORTFOLIO CONSTRAINTS:
+- Capital: \u20b9{capital:.0f}
+- Maximum {max_positions} positions at once
+- Maximum 3% of capital at risk per trade
+- Always set a stop-loss (SL_M order)
+
+RESPOND with a JSON array. Each signal must include:
 {{"action": "BUY"|"SELL"|"CANCEL", "symbol": "...", "quantity": N, \
 "order_type": "MARKET"|"LIMIT"|"SL_M", "limit_price": 0.0, "stop_price": 0.0, \
-"product_type": "CNC"|"MIS", "reasoning": "..."}}
+"product_type": "CNC"|"MIS", \
+"reasoning": "THESIS: ... EVIDENCE: ... CONVICTION: N/10"}}
 
-Always include "reasoning" explaining your decision.
-Return [] if no trades today.
+Return [] if no thesis reaches conviction 7+. Sitting in cash is a valid decision.
 """
 
 
 @register("llm_autonomous_trader")
 class LLMAutonomousTrader(Strategy):
-    """AI portfolio manager that receives narrative dashboards and makes
-    all trading decisions, constrained by safety guardrails."""
+    """Thesis-driven AI portfolio manager that receives factual data
+    summaries and builds its own investment theses, constrained by
+    safety guardrails."""
 
     def required_data(self) -> list[dict]:
         return [{"interval": "day", "lookback": 200}]
@@ -84,10 +106,14 @@ class LLMAutonomousTrader(Strategy):
         self.trades_today: int = 0
         self.last_bar_number: int = -1
 
-        # Format system prompt with capital
+        # Number of stocks (for system prompt)
+        self.n_stocks = len(instruments) if instruments else 0
+
+        # Format system prompt with capital and stock count
         self.system_prompt = SYSTEM_PROMPT.format(
             capital=self.initial_capital,
             max_positions=self.max_positions,
+            n_stocks=self.n_stocks,
         )
 
     def on_bar(self, snapshot: MarketSnapshot) -> list[Signal]:

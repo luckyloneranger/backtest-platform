@@ -1,4 +1,4 @@
-"""Tests for LLM Autonomous Trader strategy."""
+"""Tests for LLM Autonomous Trader strategy — thesis-driven approach."""
 
 import json
 from unittest.mock import patch, MagicMock
@@ -111,8 +111,8 @@ def test_required_data():
 
 
 def test_narrative_sent_to_llm():
-    """Verify the LLM receives narrative text (not raw numbers),
-    and check for keywords like 'oversold', 'TRENDING', 'CONFLUENCE'."""
+    """Verify the LLM receives factual narrative (not interpreted conclusions),
+    and check for thesis-driven keywords in system prompt."""
     s = _init_strategy()
     _warm_up(s)
 
@@ -128,16 +128,30 @@ def test_narrative_sent_to_llm():
     s.on_bar(snap)
 
     assert len(captured_messages) == 2
+
+    system_content = captured_messages[0]["content"]
     user_content = captured_messages[1]["content"]
 
-    # Narrative builder keywords that appear in English interpretation
+    # System prompt should contain thesis-driven keywords
+    assert "THESIS" in system_content
+    assert "CONVICTION" in system_content
+    assert "COUNTER-THESIS" in system_content
+    assert "EVIDENCE" in system_content
+    # System prompt should NOT contain old rule-based keywords
+    assert "CRITICAL TRADING RULES" not in system_content
+    assert "ADX>25" not in system_content
+    assert "ADX<20" not in system_content
+
+    # Narrative (user content) should contain factual sections
     assert "PORTFOLIO SUMMARY" in user_content
-    assert "MARKET REGIME" in user_content
     assert "TEST" in user_content
-    # Confluence section is always present in symbol narrative
-    assert "CONFLUENCE" in user_content
-    # Should contain narrative text, not raw arrays of numbers
-    assert "SUGGESTION" in user_content
+    # Narrative should NOT contain old interpretive keywords
+    assert "SUGGESTION" not in user_content
+    assert "CONFLUENCE" not in user_content
+    assert "POTENTIAL LONG" not in user_content
+    assert "POTENTIAL SHORT" not in user_content
+    assert "oversold" not in user_content.lower()
+    assert "overbought" not in user_content.lower()
 
 
 def test_guardrail_position_cap():
