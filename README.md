@@ -149,7 +149,7 @@ export AZURE_OPENAI_API_KEY=your_api_key
 export AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ```
 
-Or add these to your `.env` file. Required when running LLM-based strategies (`llm_signal_generator`, `llm_autonomous_trader`).
+Or add these to your `.env` file. Required when running the LLM autonomous trader strategy.
 
 ## Writing a Strategy
 
@@ -232,7 +232,6 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `ml_classifier` | ML | day | GradientBoosting classifier with 20+ features, rolling training, confidence-gated entries. |
 | `ou_mean_reversion` | ML/Stats | day | Ornstein-Uhlenbeck mean reversion — statistically validated via statsmodels OLS. **Consistently profitable.** |
 | `ensemble_meta` | ML | day | Adaptive ensemble — LogisticRegression learns which sub-signal combinations predict returns. |
-| `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
 | `llm_autonomous_trader` | LLM | 15min + day | **Thesis-driven AI portfolio manager** — multi-timeframe with VWAP, cointegration, cross-stock analysis. Reflective learning via weekly belief updates. ~1,500 LLM calls/year. |
 
 ## Strategy Interface
@@ -269,7 +268,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (176 tests)
 cd engine && cargo test
 
-# Python (349 tests)
+# Python (320 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
