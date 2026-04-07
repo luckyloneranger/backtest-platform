@@ -26,6 +26,8 @@ An Indian market backtesting platform for evaluating trading strategies against 
 - **Multi-symbol backtests** — all symbols grouped per timestamp in one `on_bar` call
 - **Multi-exchange support** — `--exchange` flag supports NSE, BSE, MCX
 - **LLM-based strategies** — Azure OpenAI integration for AI-powered signal generation
+- **LLM autonomous trader** — thesis-driven portfolio manager with 15-min + daily multi-timeframe analysis, using 16 technical indicators including VWAP, cointegration, and halflife
+- **Reflective learning** — LLM learns from its own trades and missed opportunities via weekly reflection cycles, producing an evolving beliefs document that persists across sessions
 - **Candle data merging** — fetching additional date ranges merges with existing data, never overwrites
 
 ## Architecture
@@ -42,7 +44,7 @@ CLI (Rust) ─┬─ Data Manager ──► SQLite (instruments) + Parquet (cand
 | `engine/crates/data` | Rust | Kite API client, SQLite instruments, Parquet candle storage |
 | `engine/crates/proto` | Rust | gRPC proto definitions + codegen |
 | `engine/crates/cli` | Rust | CLI binary (`backtest`) |
-| `strategies/` | Python | gRPC strategy server + strategy implementations |
+| `strategies/` | Python | gRPC strategy server + strategy implementations + shared modules (indicators, narrative builder, experience manager, position manager) |
 
 ## Prerequisites
 
@@ -147,7 +149,7 @@ export AZURE_OPENAI_API_KEY=your_api_key
 export AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ```
 
-Or add these to your `.env` file. Required only when running LLM-based strategies like `llm_signal_generator`.
+Or add these to your `.env` file. Required when running LLM-based strategies (`llm_signal_generator`, `llm_autonomous_trader`).
 
 ## Writing a Strategy
 
@@ -231,6 +233,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 | `ou_mean_reversion` | ML/Stats | day | Ornstein-Uhlenbeck mean reversion — statistically validated via statsmodels OLS. **Consistently profitable.** |
 | `ensemble_meta` | ML | day | Adaptive ensemble — LogisticRegression learns which sub-signal combinations predict returns. |
 | `llm_signal_generator` | LLM | day | Direct signal generation via Azure OpenAI — full order type control |
+| `llm_autonomous_trader` | LLM | 15min + day | **Thesis-driven AI portfolio manager** — multi-timeframe with VWAP, cointegration, cross-stock analysis. Reflective learning via weekly belief updates. ~1,500 LLM calls/year. |
 
 ## Strategy Interface
 
@@ -266,7 +269,7 @@ backtest run --strategy my_strategy --symbols RELIANCE --from 2024-01-01 --to 20
 # Rust (176 tests)
 cd engine && cargo test
 
-# Python (283 tests)
+# Python (349 tests)
 cd strategies && source .venv/bin/activate && pytest tests/ -v
 
 # End-to-end
@@ -287,8 +290,15 @@ backtest-platform/
 ├── strategies/                 # Python strategy server
 │   ├── server/                 # gRPC server + registry
 │   ├── strategies/             # Strategy base classes + implementations
+│   │   ├── base.py             # Strategy ABC, MarketSnapshot, Signal
+│   │   ├── indicators.py       # 17 technical indicators (pandas-ta gateway)
+│   │   ├── position_manager.py # Shared order lifecycle management
+│   │   ├── narrative_builder.py # Facts-only English narratives for LLM
+│   │   ├── experience_manager.py # Reflective learning (journal, beliefs, persistence)
+│   │   ├── llm_client.py       # Azure OpenAI REST client
 │   │   ├── deterministic/      # Rule-based strategies
 │   │   └── llm/                # LLM-powered strategies
+│   ├── data/                   # Experience persistence (JSON, gitignored)
 │   └── tests/
 ├── data/                       # Local data cache (gitignored)
 ├── results/                    # Backtest results (gitignored)
