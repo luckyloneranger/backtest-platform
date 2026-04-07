@@ -4,6 +4,8 @@ from strategies.narrative_builder import (
     build_portfolio_narrative,
     build_regime_narrative,
     build_symbol_narrative,
+    build_intraday_narrative,
+    build_cross_stock_narrative,
     build_trade_history_narrative,
 )
 
@@ -148,6 +150,189 @@ def test_symbol_narrative_risk_math():
     assert "3% capital risk" in result
     # 2 * 10 = 20; 100000 * 0.03 / 20 = 150
     assert "150 shares" in result
+
+
+def test_symbol_narrative_with_zscore():
+    """Z-score is included when provided."""
+    features = {
+        "rsi_14": 50.0,
+        "adx_14": 22.0,
+        "macd_hist": 0.5,
+        "bb_pct_b": 0.5,
+        "obv_slope_10": 0.0,
+        "close_sma_ratio": 1.0,
+    }
+    result = build_symbol_narrative("SBIN", 500.0, features, 10.0, None, 100000, zscore=1.8)
+    assert "z-score" in result.lower()
+    assert "+1.8" in result
+    assert "above" in result.lower()
+    assert "standard deviations" in result
+
+
+def test_symbol_narrative_zscore_negative():
+    """Negative z-score uses 'below'."""
+    features = {
+        "rsi_14": 50.0,
+        "adx_14": 22.0,
+        "macd_hist": 0.5,
+        "bb_pct_b": 0.5,
+        "obv_slope_10": 0.0,
+        "close_sma_ratio": 1.0,
+    }
+    result = build_symbol_narrative("ITC", 400.0, features, 8.0, None, 100000, zscore=-2.1)
+    assert "-2.1" in result
+    assert "below" in result.lower()
+
+
+def test_symbol_narrative_no_zscore():
+    """No z-score -> no statistical position section."""
+    features = {
+        "rsi_14": 50.0,
+        "adx_14": 22.0,
+        "macd_hist": 0.5,
+        "bb_pct_b": 0.5,
+        "obv_slope_10": 0.0,
+        "close_sma_ratio": 1.0,
+    }
+    result = build_symbol_narrative("TCS", 3500.0, features, 50.0, None, 100000)
+    assert "Statistical position" not in result
+
+
+# ---------------------------------------------------------------------------
+# build_intraday_narrative — VWAP, 15-min indicators
+# ---------------------------------------------------------------------------
+
+def test_intraday_narrative_vwap():
+    """VWAP and VWAP bands appear in intraday narrative."""
+    # Simulate 10 bars of intraday data
+    closes = [100.0 + i * 0.5 for i in range(10)]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    volumes = [50000] * 10
+
+    result = build_intraday_narrative(
+        "RELIANCE", closes, highs, lows, volumes,
+        closes, highs, lows,
+        daily_prev_close=99.0,
+    )
+    assert "RELIANCE INTRADAY" in result
+    assert "VWAP" in result
+
+
+def test_intraday_narrative_session_gap():
+    """Session gap from previous daily close."""
+    closes = [105.0, 106.0, 107.0]
+    highs = [106.0, 107.0, 108.0]
+    lows = [104.0, 105.0, 106.0]
+    volumes = [50000] * 3
+
+    result = build_intraday_narrative(
+        "TCS", closes, highs, lows, volumes,
+        closes, highs, lows,
+        daily_prev_close=100.0,
+    )
+    assert "Session gap" in result
+    assert "+5.0%" in result
+
+
+def test_intraday_narrative_no_data():
+    """Empty intraday data -> appropriate message."""
+    result = build_intraday_narrative(
+        "INFY", [], [], [], [],
+        [], [], [],
+        daily_prev_close=1500.0,
+    )
+    assert "No intraday data" in result
+
+
+def test_intraday_narrative_no_suggestions():
+    """Intraday narrative should not contain interpretive keywords."""
+    closes = [100.0 + i for i in range(20)]
+    highs = [c + 2.0 for c in closes]
+    lows = [c - 2.0 for c in closes]
+    volumes = [60000] * 20
+
+    result = build_intraday_narrative(
+        "SBIN", closes, highs, lows, volumes,
+        closes, highs, lows,
+        daily_prev_close=99.0,
+    )
+    assert "buy" not in result.lower() or "above" in result.lower()
+    assert "sell" not in result.lower()
+    assert "POTENTIAL" not in result
+    assert "SUGGESTION" not in result
+
+
+def test_intraday_narrative_volume_profile():
+    """Volume profile shows bar count and average volume."""
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    volumes = [40000, 50000, 60000, 45000, 55000]
+
+    result = build_intraday_narrative(
+        "HDFC", closes, highs, lows, volumes,
+        closes, highs, lows,
+        daily_prev_close=99.0,
+    )
+    assert "5 bars today" in result
+    assert "Volume profile" in result
+
+
+# ---------------------------------------------------------------------------
+# build_cross_stock_narrative — correlations, cointegration, z-scores
+# ---------------------------------------------------------------------------
+
+def test_cross_stock_narrative_correlations():
+    """Cross-stock shows correlation pairs."""
+    import math
+    # Create correlated price series
+    n = 50
+    base = [100.0 + i * 0.5 + math.sin(i * 0.3) * 5 for i in range(n)]
+    series_a = base[:]
+    series_b = [x + 10.0 + (i % 3) * 0.1 for i, x in enumerate(base)]  # highly correlated
+    series_c = [200.0 - x for x in base]  # negatively correlated
+
+    all_closes = {"A": series_a, "B": series_b, "C": series_c}
+    result = build_cross_stock_narrative(all_closes, ["A", "B", "C"])
+    assert "CROSS-STOCK ANALYSIS" in result
+    assert "correlations" in result.lower()
+    # Should show the ρ symbol
+    assert "ρ=" in result
+
+
+def test_cross_stock_narrative_z_scores():
+    """Cross-stock shows relative z-scores."""
+    n = 50
+    # Stock trending up (positive z-score)
+    series_up = [100.0 + i * 2.0 for i in range(n)]
+    # Stock trending down (negative z-score)
+    series_down = [200.0 - i * 2.0 for i in range(n)]
+    # Stock flat (near zero z-score)
+    series_flat = [150.0 + (i % 5 - 2) * 0.5 for i in range(n)]
+
+    all_closes = {"UP": series_up, "DOWN": series_down, "FLAT": series_flat}
+    result = build_cross_stock_narrative(all_closes, ["UP", "DOWN", "FLAT"])
+    assert "z-scores" in result.lower()
+
+
+def test_cross_stock_narrative_insufficient_data():
+    """Less than 2 symbols with enough data -> appropriate message."""
+    all_closes = {"A": [100.0] * 5}  # too few bars
+    result = build_cross_stock_narrative(all_closes, ["A"])
+    assert "Insufficient data" in result
+
+
+def test_cross_stock_narrative_no_suggestions():
+    """Cross-stock narrative has no trading suggestions."""
+    n = 50
+    base = [100.0 + i for i in range(n)]
+    all_closes = {"X": base[:], "Y": [x + 5 for x in base]}
+    result = build_cross_stock_narrative(all_closes, ["X", "Y"])
+    assert "SUGGESTION" not in result
+    assert "POTENTIAL" not in result
+    assert "consider" not in result.lower()
+    assert "recommend" not in result.lower()
 
 
 # ---------------------------------------------------------------------------

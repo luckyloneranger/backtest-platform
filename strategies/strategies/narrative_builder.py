@@ -4,14 +4,28 @@ summaries for LLM-based strategies.
 Presents FACTS without interpretation, conclusions, or suggestions.
 The LLM builds its own thesis from the data.
 
-Four public functions:
-  - build_symbol_narrative       -- per-symbol factual data summary
-  - build_regime_narrative       -- market-wide regime facts
-  - build_portfolio_narrative    -- portfolio-level summary
+Six public functions:
+  - build_symbol_narrative        -- per-symbol factual data summary (daily)
+  - build_intraday_narrative      -- per-symbol intraday context (VWAP, 15-min indicators)
+  - build_cross_stock_narrative   -- cross-stock correlations, cointegration, z-scores
+  - build_regime_narrative        -- market-wide regime facts
+  - build_portfolio_narrative     -- portfolio-level summary
   - build_trade_history_narrative -- recent trade outcomes
 """
 
 from __future__ import annotations
+
+from strategies.indicators import (
+    compute_cointegration,
+    compute_correlation,
+    compute_halflife,
+    compute_rsi,
+    compute_atr,
+    compute_macd,
+    compute_vwap,
+    compute_vwap_bands,
+    compute_zscore,
+)
 
 
 def build_symbol_narrative(
@@ -21,6 +35,7 @@ def build_symbol_narrative(
     atr: float | None,
     position: dict | None,  # {qty, avg_price, unrealized_pnl, product_type} or None
     capital: float,
+    zscore: float | None = None,
 ) -> str:
     """Build a factual narrative for one symbol.
 
@@ -156,6 +171,13 @@ def build_symbol_narrative(
     if ret_parts:
         lines.append(f"  Returns: {'. '.join(ret_parts)}.")
 
+    # --- Statistical position (z-score) ---
+    if zscore is not None:
+        lines.append(
+            f"  Statistical position: 20-day z-score {zscore:+.1f}\u03c3 "
+            f"({abs(zscore):.1f} standard deviations {'above' if zscore > 0 else 'below'} rolling mean)."
+        )
+
     # --- Risk math (pure calculation) ---
     if atr is not None and close > 0:
         stop_distance = 2.0 * atr
@@ -165,6 +187,190 @@ def build_symbol_narrative(
             f"  Risk math: 2x ATR stop = ₹{stop_distance:.2f} ({stop_pct:.1f}% from entry). "
             f"At 3% capital risk, max {max_shares} shares."
         )
+
+    return "\n".join(lines)
+
+
+def build_intraday_narrative(
+    symbol: str,
+    intraday_closes: list[float],
+    intraday_highs: list[float],
+    intraday_lows: list[float],
+    intraday_volumes: list[int],
+    m15_closes: list[float],
+    m15_highs: list[float],
+    m15_lows: list[float],
+    daily_prev_close: float | None,
+) -> str:
+    """Build a factual intraday narrative for one symbol.
+
+    Uses today's 15-min bars for VWAP and VWAP bands (daily reset).
+    Uses rolling 15-min buffers for RSI, MACD, ATR.
+    Compares current price to previous daily close for session gap.
+    """
+    if not intraday_closes:
+        return f"\n{symbol} INTRADAY: No intraday data yet."
+
+    lines = [f"\n{symbol} INTRADAY (15-min):"]
+    current_price = intraday_closes[-1]
+
+    # --- VWAP ---
+    vwap = compute_vwap(intraday_highs, intraday_lows, intraday_closes, intraday_volumes)
+    if vwap is not None and vwap > 0:
+        vwap_pct = (current_price - vwap) / vwap * 100
+        lines.append(
+            f"  VWAP: \u20b9{vwap:.2f}. Price {'+'if vwap_pct > 0 else ''}{vwap_pct:.1f}% from VWAP."
+        )
+
+        # VWAP bands (1 std dev)
+        bands = compute_vwap_bands(
+            intraday_highs, intraday_lows, intraday_closes, intraday_volumes, std_mult=1.0,
+        )
+        if bands is not None:
+            _, upper, lower = bands
+            band_range = upper - lower
+            if band_range > 0:
+                position_pct = (current_price - lower) / band_range * 100
+                lines.append(
+                    f"  VWAP bands (1\u03c3): Upper \u20b9{upper:.2f}, Lower \u20b9{lower:.2f}. "
+                    f"Price at {position_pct:.0f}th percentile."
+                )
+            else:
+                lines.append(
+                    f"  VWAP bands (1\u03c3): Upper \u20b9{upper:.2f}, Lower \u20b9{lower:.2f}."
+                )
+
+    # --- Session gap from previous close ---
+    if daily_prev_close is not None and daily_prev_close > 0:
+        gap_pct = (intraday_closes[0] - daily_prev_close) / daily_prev_close * 100
+        if abs(gap_pct) > 0.05:
+            lines.append(
+                f"  Session gap: {'+'if gap_pct > 0 else ''}{gap_pct:.1f}% from previous close "
+                f"(\u20b9{daily_prev_close:.2f})."
+            )
+
+    # --- 15-min RSI (from rolling buffer) ---
+    m15_rsi = compute_rsi(m15_closes, 14) if len(m15_closes) >= 15 else None
+    if m15_rsi is not None:
+        lines.append(f"  15-min RSI: {m15_rsi:.0f}.")
+
+    # --- 15-min MACD (from rolling buffer) ---
+    m15_macd = compute_macd(m15_closes) if len(m15_closes) >= 35 else None
+    if m15_macd is not None:
+        _, _, hist = m15_macd
+        m15_macd_prev = compute_macd(m15_closes[:-1]) if len(m15_closes) > 35 else None
+        slope_text = ""
+        if m15_macd_prev is not None:
+            _, _, prev_hist = m15_macd_prev
+            if hist > prev_hist:
+                slope_text = ", rising"
+            elif hist < prev_hist:
+                slope_text = ", falling"
+            else:
+                slope_text = ", flat"
+        lines.append(f"  15-min MACD histogram: {hist:+.2f}{slope_text}.")
+
+    # --- 15-min ATR ---
+    m15_atr = compute_atr(m15_highs, m15_lows, m15_closes, 14) if len(m15_closes) >= 15 else None
+    if m15_atr is not None:
+        lines.append(f"  15-min ATR: \u20b9{m15_atr:.2f}.")
+
+    # --- Volume profile ---
+    n_bars = len(intraday_closes)
+    if intraday_volumes:
+        avg_vol = sum(intraday_volumes) / n_bars
+        total_vol = sum(intraday_volumes)
+        lines.append(
+            f"  Volume profile: {n_bars} bars today, avg volume {avg_vol:,.0f}, "
+            f"total {total_vol:,.0f}."
+        )
+
+    return "\n".join(lines)
+
+
+def build_cross_stock_narrative(
+    all_daily_closes: dict[str, list[float]],
+    symbols: list[str],
+) -> str:
+    """Build a cross-stock statistical analysis narrative.
+
+    Computes correlations, cointegration (for highly correlated pairs),
+    halflife (for cointegrated pairs), and relative z-scores.
+    Factual only — no pair trade suggestions.
+    """
+    lines = ["\nCROSS-STOCK ANALYSIS:"]
+
+    # Need at least 2 symbols with sufficient data
+    valid_symbols = [s for s in symbols if s in all_daily_closes and len(all_daily_closes[s]) >= 30]
+    if len(valid_symbols) < 2:
+        lines.append("  Insufficient data for cross-stock analysis.")
+        return "\n".join(lines)
+
+    # --- Correlation matrix (top pairs) ---
+    corr_pairs: list[tuple[str, str, float]] = []
+    for i in range(len(valid_symbols)):
+        for j in range(i + 1, len(valid_symbols)):
+            s_a, s_b = valid_symbols[i], valid_symbols[j]
+            corr = compute_correlation(all_daily_closes[s_a], all_daily_closes[s_b], 30)
+            if corr is not None:
+                corr_pairs.append((s_a, s_b, corr))
+
+    if corr_pairs:
+        # Sort by absolute correlation, show top 3
+        corr_pairs.sort(key=lambda x: abs(x[2]), reverse=True)
+        top_corr = corr_pairs[:3]
+        lines.append("  Strongest correlations (30-day):")
+        for s_a, s_b, corr in top_corr:
+            lines.append(f"    {s_a}-{s_b}: \u03c1={corr:+.2f}")
+
+    # --- Cointegration for highly correlated pairs ---
+    coint_results: list[tuple[str, str, float, float, float | None, int | None]] = []
+    high_corr_pairs = [(a, b, c) for a, b, c in corr_pairs if abs(c) > 0.7]
+    for s_a, s_b, _ in high_corr_pairs[:5]:  # limit to top 5 to control compute time
+        coint = compute_cointegration(all_daily_closes[s_a], all_daily_closes[s_b])
+        if coint is not None:
+            p_val, hedge_ratio = coint
+            if p_val < 0.05:
+                # Compute spread and its z-score
+                closes_a = all_daily_closes[s_a]
+                closes_b = all_daily_closes[s_b]
+                spread = [a - hedge_ratio * b for a, b in zip(closes_a[-30:], closes_b[-30:])]
+                spread_z = compute_zscore(spread, 20) if len(spread) >= 20 else None
+                hl = compute_halflife(spread) if len(spread) >= 20 else None
+                coint_results.append((s_a, s_b, p_val, hedge_ratio, spread_z, hl))
+
+    if coint_results:
+        lines.append("  Cointegrated pairs (p < 0.05):")
+        for s_a, s_b, p_val, hedge, spread_z, hl in coint_results:
+            z_text = f", spread z-score {spread_z:+.1f}" if spread_z is not None else ""
+            lines.append(f"    {s_a}-{s_b}: p={p_val:.3f}, hedge ratio {hedge:.2f}{z_text}")
+            if hl is not None:
+                lines.append(f"      Spread halflife: {hl} bars.")
+
+    # --- Relative z-scores ---
+    z_scores: list[tuple[str, float]] = []
+    for s in valid_symbols:
+        zs = compute_zscore(all_daily_closes[s], 20)
+        if zs is not None:
+            z_scores.append((s, zs))
+
+    if z_scores:
+        z_scores.sort(key=lambda x: x[1], reverse=True)
+        lines.append("  Relative z-scores (20-day):")
+        # Show top 3 most extended and bottom 3
+        most_overbought = [(s, z) for s, z in z_scores if z > 0.5][:3]
+        most_oversold = [(s, z) for s, z in reversed(z_scores) if z < -0.5][:3]
+        near_mean = [(s, z) for s, z in z_scores if abs(z) <= 0.5]
+
+        if most_overbought:
+            items = ", ".join(f"{s} z={z:+.1f}" for s, z in most_overbought)
+            lines.append(f"    Most extended up: {items}")
+        if most_oversold:
+            items = ", ".join(f"{s} z={z:+.1f}" for s, z in most_oversold)
+            lines.append(f"    Most extended down: {items}")
+        if near_mean:
+            items = ", ".join(f"{s} z={z:+.1f}" for s, z in near_mean[:4])
+            lines.append(f"    Near mean: {items}")
 
     return "\n".join(lines)
 
